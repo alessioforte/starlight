@@ -1,0 +1,9 @@
+/target
+.snippets
+
+.DS_Store
+NOTE.md
+flamegraph.svg
+profile.json.gz
+.starlight/data
+.env*

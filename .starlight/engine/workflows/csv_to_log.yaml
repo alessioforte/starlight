@@ -1,0 +1,63 @@
+id: csv_to_log
+name: CSV to Log Example
+description: >-
+  An example workflow that reads data from a CSV file and logs it to the console.
+tasks:
+  - id: csv_reader
+    type: csv_reader
+    dependencies: []
+    params:
+      filename: match_12.csv
+      base_path: ./.starlight/data/
+      interval: 1ns
+    handles:
+      out:
+        - csv_reader_out
+  - id: type_converter
+    type: type_converter
+    dependencies:
+      - csv_reader_out
+    params:
+      rules:
+        - key: serial_number
+          type: string
+        - key: tag_number
+          type: int
+        - key: club
+          type: string
+        - key: match_id
+          type: int
+        - key: timestamp
+          type: int
+        - key: lat
+          type: float
+        - key: lon
+          type: float
+        - key: px
+          type: float
+        - key: py
+          type: float
+        - key: vx
+          type: float
+        - key: vy
+          type: float
+        - key: vmod
+          type: float
+        - key: ax
+          type: float
+        - key: ay
+          type: float
+        - key: amod
+          type: float
+        - key: mp
+          type: float
+    handles:
+      out:
+        - type_converter_out
+  - id: stdout_logger
+    type: stdout_logger
+    dependencies:
+      - type_converter_out
+    params:
+      format: "record: {}"
+    handles: {}

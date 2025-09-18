@@ -1,0 +1,54 @@
+{
+  "id": "67645787f0c7eb5463a74651",
+  "name": "Random Numbers Example",
+  "description": "An example workflow that generates random numbers and logs them.",
+  "tasks": [
+    {
+      "dependencies": ["67bc864a55abf2ae57a48172"],
+      "params": {
+        "format": "after: {}"
+      },
+      "handles": {},
+      "id": "6764578b978d119d1d632330",
+      "type": "stdout_logger"
+    },
+    {
+      "dependencies": ["67bc864a55abf2ae57a48171"],
+      "params": {
+        "format": "before: {}"
+      },
+      "handles": {},
+      "id": "6764578b978d119d1d632336",
+      "type": "stdout_logger"
+    },
+    {
+      "dependencies": ["67bc864a55abf2ae57a48173"],
+      "params": {
+        "mapping": {
+          "tmp": "state.temperature",
+          "prs": "state.pressure",
+          "umd": "state.umidity"
+        }
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48172"]
+      },
+      "id": "67645795978d119d1d632332",
+      "type": "json_remapper"
+    },
+    {
+      "dependencies": [],
+      "params": {
+        "interval": "1s",
+        "keys": ["tmp", "umd", "prs"],
+        "max": 100,
+        "min": 0
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48171", "67bc864a55abf2ae57a48173"]
+      },
+      "id": "67645799978d119d1d632333",
+      "type": "random_numbers_generator"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "67645787f0c7eb5463a74653",
+  "name": "Random Numbers Example",
+  "description": "An example workflow that generates random numbers and sends them to a mockoon server.",
+  "tasks": [
+    {
+      "dependencies": ["67bc864a55abf2ae57a48172"],
+      "params": {
+        "method": "POST",
+        "endpoint": "http://localhost:4040/mockoon/datagate",
+        "interval": 1000
+      },
+      "handles": {},
+      "id": "6764578b978d119d1d632330",
+      "type": "http_sender"
+    },
+    {
+      "dependencies": ["67bc864a55abf2ae57a48171"],
+      "params": {
+        "mapping": {
+          "fcr_ar": "acc"
+        }
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48172"]
+      },
+      "id": "67645795978d119d1d632332",
+      "type": "json_remapper"
+    },
+    {
+      "dependencies": [],
+      "params": {
+        "interval": 1,
+        "keys": ["fcr_ar"],
+        "max": 100,
+        "min": 0
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48171"]
+      },
+      "id": "67645799978d119d1d632333",
+      "type": "random_numbers_generator"
+    }
+  ]
+}

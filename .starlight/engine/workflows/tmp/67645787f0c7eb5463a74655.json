@@ -1,0 +1,114 @@
+{
+  "id": "67645787f0c7eb5463a74655",
+  "name": "CSV Reader Example",
+  "description": "An example workflow that reads data from a CSV file and sends it to a mockoon server.",
+  "tasks": [
+    {
+      "dependencies": ["67bc864a55abf2ae57a48173"],
+      "params": {
+        "method": "POST",
+        "endpoint": "http://localhost:4040/mockoon/datagate",
+        "interval": 1000
+      },
+      "handles": {},
+      "id": "6764578b978d119d1d632330",
+      "type": "http_sender"
+    },
+    {
+      "dependencies": ["67bc864a55abf2ae57a48172"],
+      "params": {
+        "mapping": {
+          "Sensors": "timestamp",
+          "AT-2-X": "things.CONTROL_UNIT_2024083.AT-2.acceleration_x",
+          "AT-2-Y": "things.CONTROL_UNIT_2024083.AT-2.acceleration_y",
+          "AT-2-Z": "things.CONTROL_UNIT_2024083.AT-2.acceleration_z",
+          "AT-3-X": "things.CONTROL_UNIT_2024083.AT-3.acceleration_x",
+          "AT-3-Y": "things.CONTROL_UNIT_2024083.AT-3.acceleration_y",
+          "AT-3-Z": "things.CONTROL_UNIT_2024083.AT-3.acceleration_z",
+          "AVO-1-Y": "things.CONTROL_UNIT_2024083.AVO-1.acceleration_y",
+          "AVO-1-Z": "things.CONTROL_UNIT_2024083.AVO-1.acceleration_z",
+          "AVO-2-Y": "things.CONTROL_UNIT_2024083.AVO-2.acceleration_y",
+          "AVO-2-Z": "things.CONTROL_UNIT_2024083.AVO-2.acceleration_z"
+        }
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48173"]
+      },
+      "id": "67645795978d119d1d632334",
+      "type": "json_remapper"
+    },
+
+    {
+      "dependencies": ["67bc864a55abf2ae57a48171"],
+      "params": {
+        "rules": [
+          {
+            "key": "Sensors",
+            "type": "timestamp",
+            "format": "%d/%m/%y %H:%M:%S%.3f"
+          },
+
+          {
+            "key": "AT-2-X",
+            "type": "float"
+          },
+          {
+            "key": "AT-2-Y",
+            "type": "float"
+          },
+          {
+            "key": "AT-2-Z",
+            "type": "float"
+          },
+          {
+            "key": "AT-3-X",
+            "type": "float"
+          },
+          {
+            "key": "AT-3-Y",
+            "type": "float"
+          },
+          {
+            "key": "AT-3-Z",
+            "type": "float"
+          },
+          {
+            "key": "AVO-1-Y",
+            "type": "float"
+          },
+          {
+            "key": "AVO-1-Z",
+            "type": "float"
+          },
+          {
+            "key": "AVO-2-Y",
+            "type": "float"
+          },
+          {
+            "key": "AVO-2-Z",
+            "type": "float"
+          }
+        ]
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48172"]
+      },
+      "id": "67645795978d119d1d632332",
+      "type": "type_converter"
+    },
+
+    {
+      "dependencies": [],
+      "params": {
+        "filename": "acc.csv",
+        "delimiter": ";",
+        "interval": 1
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48171"]
+      },
+      "id": "67645799978d119d1d632333",
+      "type": "csv_reader"
+    }
+  ]
+}

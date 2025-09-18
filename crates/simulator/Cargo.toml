@@ -1,0 +1,12 @@
+[package]
+name = "simulator"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+readme.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rand = "0.9.1"
+rand_distr = "0.5.1"

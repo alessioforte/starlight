@@ -1,0 +1,12 @@
+current_context: default
+contexts:
+  default:
+    name: default
+    description: ""
+    endpoint: "http://localhost:8246"
+    api_key: ""
+  remote:
+    name: remote
+    description: "Remote server"
+    endpoint: "http://remote-server:8246"
+    api_key: "your_api_key_here"

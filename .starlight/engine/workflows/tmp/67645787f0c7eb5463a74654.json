@@ -1,0 +1,44 @@
+{
+  "id": "67645787f0c7eb5463a74654",
+  "name": "CSV Reader Example",
+  "description": "An example workflow that reads data from a CSV file and sends it to a mockoon server.",
+  "tasks": [
+    {
+      "dependencies": ["67bc864a55abf2ae57a48172"],
+      "params": {
+        "method": "POST",
+        "endpoint": "http://localhost:4040/mockoon/datagate",
+        "interval": 1000
+      },
+      "handles": {},
+      "id": "6764578b978d119d1d632330",
+      "type": "http_sender"
+    },
+    {
+      "dependencies": ["67bc864a55abf2ae57a48171"],
+      "params": {
+        "mapping": {
+          "id": "id",
+          "x": "x",
+          "y": "y"
+        }
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48172"]
+      },
+      "id": "67645795978d119d1d632332",
+      "type": "json_remapper"
+    },
+    {
+      "dependencies": [],
+      "params": {
+        "filename": "data.csv"
+      },
+      "handles": {
+        "out": ["67bc864a55abf2ae57a48171"]
+      },
+      "id": "67645799978d119d1d632333",
+      "type": "csv_reader"
+    }
+  ]
+}
