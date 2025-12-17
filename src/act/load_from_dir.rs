@@ -1,4 +1,5 @@
-use engine::{Config, Engine};
+// use engine::{Config, Engine};
+use eng::{Config, Engine};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -15,14 +16,28 @@ pub async fn load_workflow_from_dir(engine: &Arc<Mutex<Engine>>) {
                 if ext != "json" && ext != "yaml" {
                     continue;
                 }
-                if ext == "json" {
-                    let config: Config = serde_json::from_reader(file)
+                let config = if ext == "json" {
+                    let cfg: Config = serde_json::from_reader(file)
                         .expect("error while reading JSON config file");
-                    let _ = engine.add(config);
+                    cfg
                 } else if ext == "yaml" {
-                    let config: Config =
-                        serde_yml::from_reader(file).expect("error while reading YAML config file");
-                    let _ = engine.add(config);
+                    let cfg: Config = serde_yaml_bw::from_reader(file)
+                        .expect("error while reading YAML config file");
+                    cfg
+                } else {
+                    continue;
+                };
+                match engine.add(config) {
+                    Ok(_) => {
+                        tracing::info!("Loaded workflow from file: {}", path.to_string_lossy());
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Error loading workflow from file {}: {}",
+                            path.to_string_lossy(),
+                            e
+                        );
+                    }
                 }
             } else {
                 continue;

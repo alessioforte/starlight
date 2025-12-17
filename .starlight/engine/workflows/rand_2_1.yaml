@@ -1,0 +1,33 @@
+id: rand_2_1
+name: 2 Random number generator and logger
+description: >-
+  A workflow that generates random numbers and logs them to the console.
+tasks:
+  - id: gen_a
+    type: number_generator
+    dependencies: []
+    params:
+      min: 1
+      max: 10
+    outputs:
+      out:
+        - small_numbers
+
+  - id: gen_b
+    type: number_generator
+    dependencies: []
+    params:
+      min: 100
+      max: 200
+    outputs:
+      out:
+        - large_numbers
+
+  - id: logger
+    type: logger
+    dependencies:
+      - small_numbers
+      - large_numbers
+    params:
+      prefix: "[MERGED]"
+    outputs: {}

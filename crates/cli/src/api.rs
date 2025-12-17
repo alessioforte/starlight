@@ -42,7 +42,7 @@ impl Request {
 pub struct Workflow {
     id: String,
     name: String,
-    description: String,
+    // description: String,
     status: String,
 }
 
@@ -51,8 +51,22 @@ pub async fn get_workflows() -> Result<Vec<Workflow>, reqwest::Error> {
     res.json().await.map_err(|e| e)
 }
 
-pub async fn get_workflow(id: &str) -> Result<engine::Config, reqwest::Error> {
+pub async fn get_workflow(id: &str) -> Result<eng::Config, reqwest::Error> {
     let res = Request::new(Method::GET, &format!("workflows/{}", id))
+        .send()
+        .await?;
+    res.json().await.map_err(|e| e)
+}
+
+pub async fn remove_workflow(id: &str) -> Result<(), reqwest::Error> {
+    let _ = Request::new(Method::DELETE, &format!("workflows/{}", id))
+        .send()
+        .await;
+    Ok(())
+}
+
+pub async fn get_workflow_state(id: &str) -> Result<Vec<eng::TaskInfo>, reqwest::Error> {
+    let res = Request::new(Method::GET, &format!("workflows/{}/state", id))
         .send()
         .await?;
     res.json().await.map_err(|e| e)
@@ -64,14 +78,15 @@ pub async fn get_workflow(id: &str) -> Result<engine::Config, reqwest::Error> {
 //         .await
 // }
 
-pub async fn load_workflow(id: &str) -> Result<reqwest::Response, reqwest::Error> {
-    Request::new(Method::PUT, &format!("workflows/{}", id))
-        .send()
-        .await
-}
+// pub async fn load_workflow(id: &str) -> Result<reqwest::Response, reqwest::Error> {
+//     Request::new(Method::PUT, &format!("workflows/{}", id))
+//         .send()
+//         .await
+// }
 
-pub async fn send_command(id: &str, command: &str) -> Result<reqwest::Response, reqwest::Error> {
-    Request::new(Method::PATCH, &format!("workflows/{}", id))
+pub async fn send_command(id: &str, command: &str) -> Result<(), reqwest::Error> {
+    let _ = Request::new(Method::PATCH, &format!("workflows/{}", id))
         .send_json(serde_json::json!({ "command": command }))
-        .await
+        .await;
+    Ok(())
 }

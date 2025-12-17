@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use evalexpr::*;
@@ -25,12 +25,14 @@ pub struct State {}
 task! {
     MathExpEval,
     State,
-    async fn execute(&self, channel: Option<&HandleTarget>) {
+    async fn execute(&self, id: Option<&str>) {
+        let wiring = self.wiring();
         let vars = self.params.vars.clone();
         let expressions = self.params.expressions.clone();
         let mapping = self.params.mapping.clone();
-        let mut rx = channel.unwrap().rx.lock().await;
-        while let Some(payload) = rx.recv().await {
+        let id = id.unwrap();
+        let mut rx = self.subscribe(id);
+        while let Ok(payload) = rx.recv().await {
             let constants = self.params.consts.clone();
             let mut jb = JsonBuilder::new(payload.clone());
             let mut context = HashMapContext::<DefaultNumericTypes>::new();
@@ -67,11 +69,11 @@ task! {
                 }
             }
 
-            let out_txs = self.wiring.out_txs.clone();
-            let out = out_txs.get("out").unwrap();
-            for handle in out {
+            let out = wiring.out_txs.get("out").unwrap();
+            out.iter().for_each(|handle| {
                 let _ = handle.tx.send(jb.data().clone());
-            }
+            });
+
         }
     }
 }

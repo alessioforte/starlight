@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -22,15 +22,16 @@ pub struct State {}
 task! {
     CsvWriter,
     State,
-    async fn execute(&self, channel: Option<&HandleTarget>) {
+    async fn execute(&self, id: Option<&str>) {
         let base_path = "./.starlight/data/";
         let filename = self.params.filename.clone();
         let path = format!("{}/{}", base_path, filename);
         let mut header_written = std::path::Path::new(&path).exists();
         // let delimiter = self.params.delimiter.clone().unwrap_or(",".to_string());
 
-        let mut rx = channel.unwrap().rx.lock().await;
-        while let Some(payload) = rx.recv().await {
+        let id = id.unwrap();
+        let mut rx = self.subscribe(id);
+        while let Ok(payload) = rx.recv().await {
             if let Value::Object(map) = payload {
                 let file = OpenOptions::new()
                     .create(true)

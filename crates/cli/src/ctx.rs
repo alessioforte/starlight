@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_yml;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +126,7 @@ pub fn remove_context(name: &str) -> Result<(), std::io::Error> {
 }
 
 fn save_config(config: &Config) -> Result<(), std::io::Error> {
-    let content = serde_yml::to_string(config)
+    let content = serde_yaml_bw::to_string(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(get_config_path(), content)?;
     Ok(())
@@ -136,7 +135,7 @@ fn save_config(config: &Config) -> Result<(), std::io::Error> {
 fn get_config() -> Result<Config, std::io::Error> {
     let path = get_config_path();
     let content = std::fs::read_to_string(&path)?;
-    serde_yml::from_str(&content)
+    serde_yaml_bw::from_str(&content)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
@@ -150,7 +149,7 @@ fn get_config_path() -> String {
             .expect("Unable to create CLI directory");
         let default_config = Config::default();
         let content =
-            serde_yml::to_string(&default_config).expect("Unable to serialize default config");
+            serde_yaml_bw::to_string(&default_config).expect("Unable to serialize default config");
         std::fs::write(&filepath, content).expect("Unable to write default config file");
     }
     filepath

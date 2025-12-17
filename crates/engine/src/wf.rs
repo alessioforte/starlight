@@ -1,11 +1,11 @@
+use super::cfg::{Component, Config};
 use super::tasks::{Command, HandleSource, HandleTarget, Status, Tasks, Wiring};
+use dashmap::DashMap;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{RwLock, broadcast, watch};
 use tokio::task::JoinHandle;
-
-use super::cfg::{Component, Config};
 
 /// Workflow
 /// A workflow is a collection of tasks that are executed in a specific order
@@ -18,7 +18,7 @@ pub struct Workflow {
     pub id: String,                  // Workflow ID
     pub name: Option<String>,        // Workflow name
     pub description: Option<String>, // Workflow description
-    pub state: Arc<Mutex<Value>>,    // Workflow state
+    pub state: Arc<RwLock<Value>>,   // Workflow state
     cmd_tx: watch::Sender<Command>,  // Shared command channel
     tasks: Vec<Component>,           // List of tasks
     handles: Vec<JoinHandle<()>>,    // Handles for running tasks
@@ -48,36 +48,36 @@ impl Workflow {
             description,
             tasks,
             cmd_tx,
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(RwLock::new(state)),
             handles: Vec::new(),
             status: Status::Idle,
         }
     }
 
     pub fn load(&mut self) {
-        let (state_tx, state_rx) = mpsc::unbounded_channel::<Value>();
+        // let (state_tx, state_rx) = mpsc::unbounded_channel::<Value>();
 
         let mut channels: HashMap<
             String,
-            (
-                mpsc::UnboundedSender<Value>,
-                Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
-            ),
+            // (mpsc::Sender<Value>, Arc<Mutex<mpsc::Receiver<Value>>>),
+            broadcast::Sender<Value>,
         > = HashMap::new();
 
         // Create channels for each task dependencies
         for task in &self.tasks {
             for dep in &task.dependencies {
                 if !channels.contains_key(dep) {
-                    let (tx, rx) = mpsc::unbounded_channel::<Value>();
-                    channels.insert(dep.clone(), (tx, Arc::new(Mutex::new(rx))));
+                    // let (tx, rx) = mpsc::unbounded_channel::<Value>();
+                    let (tx, _) = broadcast::channel::<Value>(1000);
+                    // channels.insert(dep.clone(), (tx, Arc::new(Mutex::new(rx))));
+                    channels.insert(dep.clone(), tx);
                 }
             }
         }
 
         for task in &self.tasks {
             // Create output transmitters
-            let out_txs: HashMap<String, Vec<HandleSource>> = task
+            let out_txs: DashMap<String, Vec<HandleSource>> = task
                 .handles
                 .iter()
                 .map(|(k, v)| {
@@ -86,7 +86,7 @@ impl Workflow {
                         v.iter()
                             .map(|id| HandleSource {
                                 id: id.clone(),
-                                tx: channels.get(id).unwrap().0.clone(),
+                                tx: channels.get(id).unwrap().clone(),
                             })
                             .collect(),
                     )
@@ -94,7 +94,7 @@ impl Workflow {
                 .collect();
 
             // Create input receivers
-            let in_rxs: HashMap<String, HandleTarget> = task
+            let in_rxs: DashMap<String, HandleTarget> = task
                 .dependencies
                 .iter()
                 .map(|id| {
@@ -102,7 +102,8 @@ impl Workflow {
                         id.clone(),
                         HandleTarget {
                             id: id.clone(),
-                            rx: channels.get(id).unwrap().1.clone(),
+                            tx: channels.get(id).unwrap().clone(),
+                            // rx: channels.get(id).unwrap().subscribe(),
                         },
                     )
                 })
@@ -110,7 +111,7 @@ impl Workflow {
 
             let wiring = Wiring {
                 cmd_rx: self.cmd_tx.subscribe(),
-                state_tx: state_tx.clone(),
+                // state_tx: state_tx.clone(),
                 out_txs,
                 in_rxs,
             };
@@ -119,8 +120,8 @@ impl Workflow {
             self.handles.push(handle);
         }
 
-        let state_manager = self.state_manager(state_rx);
-        self.handles.push(state_manager);
+        // let state_manager = self.state_manager(state_rx);
+        // self.handles.push(state_manager);
         self.status = Status::Ready;
 
         log::info!(
@@ -130,29 +131,30 @@ impl Workflow {
         );
     }
 
-    fn state_manager(
-        &self,
-        mut state_rx: mpsc::UnboundedReceiver<Value>,
-    ) -> tokio::task::JoinHandle<()> {
-        let state = Arc::clone(&self.state);
-        tokio::spawn(async move {
-            while let Some(msg) = state_rx.recv().await {
-                let mut state = state.lock().await;
-            }
-        })
-    }
+    // fn state_manager(
+    //     &self,
+    //     mut state_rx: mpsc::UnboundedReceiver<Value>,
+    // ) -> tokio::task::JoinHandle<()> {
+    //     let state = Arc::clone(&self.state);
+    //     tokio::spawn(async move {
+    //         while let Some(msg) = state_rx.recv().await {
+    //             let mut state = state.lock().await;
+    //         }
+    //     })
+    // }
 
     pub async fn info(&self) -> Info {
         Info {
             id: self.id.clone(),
             name: self.name.clone().unwrap_or_else(|| "".to_string()),
             description: self.description.clone().unwrap_or_else(|| "".to_string()),
-            state: self.state.lock().await.clone(),
+            state: self.get_state().await,
         }
     }
 
     pub async fn get_state(&self) -> Value {
-        self.state.lock().await.clone()
+        let state = self.state.read().await;
+        state.clone()
     }
 
     pub async fn display(&self) {
@@ -188,5 +190,13 @@ impl Workflow {
     pub fn stop(&mut self) {
         let _ = self.cmd_tx.send(Command::Stop);
         self.status = Status::Stopped;
+    }
+}
+
+impl Drop for Workflow {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..) {
+            handle.abort();
+        }
     }
 }

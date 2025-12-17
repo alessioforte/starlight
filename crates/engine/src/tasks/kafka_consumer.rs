@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use rdkafka::Message;
@@ -23,7 +23,8 @@ pub struct State {}
 task! {
     KafkaConsumer,
     State,
-    async fn execute(&self, _channel: Option<&HandleTarget>) {
+    async fn execute(&self, _id: Option<&str>) {
+        let wiring = Arc::clone(&self.wiring);
         let consumer: StreamConsumer = ClientConfig::new()
             .set("group.id", &self.params.group_id)
             .set("bootstrap.servers", &self.params.bootstrap_servers)
@@ -32,8 +33,7 @@ task! {
             .create()
             .expect("Failed to create consumer");
         consumer.subscribe(&[&self.params.topic]).expect("Can't subscribe");
-        let out_txs = self.wiring.out_txs.clone();
-        let out = out_txs.get("out").unwrap();
+        let out = wiring.out_txs.get("out").unwrap();
         loop {
             match consumer.recv().await {
                 Ok(m) => {

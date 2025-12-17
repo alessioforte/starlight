@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::ext::duration::DurationExt;
 use crate::task;
 use async_trait::async_trait;
@@ -30,8 +30,8 @@ pub struct State {}
 task! {
     RandomNumbersGenerator,
     State,
-    async fn execute(&self, _channel: Option<&HandleTarget>) {
-        let out_txs = self.wiring.out_txs.clone();
+    async fn execute(&self, _id: Option<&str>) {
+        let wiring = self.wiring();
         let keys = self.params.keys.clone();
         let min = self.params.min;
         let max = self.params.max;
@@ -56,10 +56,10 @@ task! {
 
                 let data = data.clone();
 
-                let out = out_txs.get("out").unwrap();
-                for handle in out {
+                let out = wiring.out_txs.get("out").unwrap();
+                out.iter().for_each(|handle| {
                     let _ = handle.tx.send(data.clone());
-                }
+                });
 
                 thread::sleep(duration);
             }

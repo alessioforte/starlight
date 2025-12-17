@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::ext::duration::DurationExt;
 use crate::task;
 use async_trait::async_trait;
@@ -39,8 +39,8 @@ impl Default for State {
 task! {
     CsvReader,
     State,
-    async fn execute(&self, _channel: Option<&HandleTarget>) {
-        let out_txs = self.wiring.out_txs.clone();
+    async fn execute(&self, _id: Option<&str>) {
+        let wiring = self.wiring();
         let filename = self.params.filename.clone();
         let delimiter = self.params.delimiter.clone().unwrap_or(",".to_string());
         let duration = Duration::parse(&self.params.interval.clone().unwrap_or("1000ms".to_string()))
@@ -120,10 +120,13 @@ task! {
             // let ts = number as i64;
             // println!("{} {}", ts, format_time(ts));
 
-            let out = out_txs.get("out").unwrap();
-            for handle in out {
+            let out = wiring.out_txs.get("out").unwrap();
+            out.iter().for_each(|handle| {
                 let _ = handle.tx.send(data.clone());
-            }
+            });
+            // for handle in out {
+            //     let _ = handle.tx.send(data.clone());
+            // }
 
             // Update line index
             self.state.line_index.fetch_add(1, Relaxed);
@@ -135,9 +138,9 @@ task! {
     }
 }
 
-use chrono::{DateTime, Local, TimeZone, Utc};
-pub fn format_time(timestamp: i64) -> String {
-    let dt = Utc.timestamp_millis_opt(timestamp).unwrap();
-    let local_dt: DateTime<Local> = dt.with_timezone(&Local);
-    local_dt.format("%M:%S%.3f").to_string()
-}
+// use chrono::{DateTime, Local, TimeZone, Utc};
+// pub fn format_time(timestamp: i64) -> String {
+//     let dt = Utc.timestamp_millis_opt(timestamp).unwrap();
+//     let local_dt: DateTime<Local> = dt.with_timezone(&Local);
+//     local_dt.format("%M:%S%.3f").to_string()
+// }

@@ -39,34 +39,34 @@ pub async fn list_workflows() -> Result<(), anyhow::Error> {
     }
 }
 
-pub async fn run_workflow(id: &str) -> Result<(), anyhow::Error> {
-    match api::load_workflow(id).await {
-        Ok(_) => match api::send_command(id, "execute").await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                eprintln!("Error executing workflow {}: {}", id, e);
-                Err(anyhow::anyhow!("Failed to execute workflow"))
-            }
-        },
-        Err(e) => {
-            eprintln!("Error running workflow {}: {}", id, e);
-            Err(anyhow::anyhow!("Failed to run workflow"))
-        }
-    }
-}
+// pub async fn run_workflow(id: &str) -> Result<(), anyhow::Error> {
+//     match api::load_workflow(id).await {
+//         Ok(_) => match api::send_command(id, "execute").await {
+//             Ok(_) => Ok(()),
+//             Err(e) => {
+//                 eprintln!("Error executing workflow {}: {}", id, e);
+//                 Err(anyhow::anyhow!("Failed to execute workflow"))
+//             }
+//         },
+//         Err(e) => {
+//             eprintln!("Error running workflow {}: {}", id, e);
+//             Err(anyhow::anyhow!("Failed to run workflow"))
+//         }
+//     }
+// }
 
-pub async fn load_workflow(id: &str) -> Result<(), anyhow::Error> {
-    match api::load_workflow(id).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("Error loading workflow {}: {}", id, e);
-            Err(anyhow::anyhow!("Failed to load workflow"))
-        }
-    }
-}
+// pub async fn load_workflow(id: &str) -> Result<(), anyhow::Error> {
+//     match api::load_workflow(id).await {
+//         Ok(_) => Ok(()),
+//         Err(e) => {
+//             eprintln!("Error loading workflow {}: {}", id, e);
+//             Err(anyhow::anyhow!("Failed to load workflow"))
+//         }
+//     }
+// }
 
 pub async fn start_workflow(id: &str) -> Result<(), anyhow::Error> {
-    match api::send_command(id, "execute").await {
+    match api::send_command(id, "start").await {
         Ok(_) => Ok(()),
         Err(e) => {
             eprintln!("Error starting workflow {}: {}", id, e);
@@ -91,6 +91,29 @@ pub async fn stop_workflow(id: &str) -> Result<(), anyhow::Error> {
         Err(e) => {
             eprintln!("Error stopping workflow {}: {}", id, e);
             Err(anyhow::anyhow!("Failed to stop workflow"))
+        }
+    }
+}
+
+pub async fn get_workflow_state(id: &str) -> Result<(), anyhow::Error> {
+    match api::get_workflow_state(id).await {
+        Ok(state) => {
+            println!("\n{}\n", serde_json::to_string_pretty(&state)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error getting state for workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to get workflow state"))
+        }
+    }
+}
+
+pub async fn remove_workflow(id: &str) -> Result<(), anyhow::Error> {
+    match api::remove_workflow(id).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Error removing workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to remove workflow"))
         }
     }
 }
@@ -135,7 +158,7 @@ pub async fn get_workflow(id: &str, output: Option<String>) -> Result<(), anyhow
                     println!("\n{}\n", serde_json::to_string_pretty(&config)?);
                 }
                 Some("yaml") => {
-                    let yaml = serde_yml::to_string(&config)?;
+                    let yaml = serde_yaml_bw::to_string(&config)?;
                     println!("\n{}\n", yaml);
                 }
                 _ => {

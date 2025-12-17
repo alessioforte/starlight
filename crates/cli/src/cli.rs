@@ -53,11 +53,12 @@ enum Commands {
         dir: Option<String>,
     },
     /// List all loaded workflows
+    #[clap(alias = "ls")]
     List,
-    Load {
-        /// Load a workflow by its ID
-        id: String,
-    },
+    // Load {
+    //     /// Load a workflow by its ID
+    //     id: String,
+    // },
     /// Run a workflow
     Run { id: String },
     /// Start a workflow
@@ -66,8 +67,14 @@ enum Commands {
     Pause { id: String },
     /// Stop a workflow
     Stop { id: String },
+    /// Delete a workflow
+    #[clap(alias = "rm")]
+    Remove { id: String },
     /// Show status of a workflow or all
     Status { id: Option<String> },
+
+    /// Get the state of a workflow
+    State { id: String },
     /// Describe a workflow
     Describe { id: String },
     /// Get details of a workflow
@@ -80,7 +87,7 @@ enum Commands {
 }
 
 #[derive(Parser)]
-#[command(name = "starlight", about = "CLI for managing workflows", long_about = None)]
+#[command(name = "sl", about = "CLI for managing workflows", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -89,13 +96,7 @@ pub struct Cli {
 impl Cli {
     pub async fn run(self) -> anyhow::Result<()> {
         match self.command {
-            Commands::List => cmd::list_workflows().await,
-            Commands::Get { id, output } => cmd::get_workflow(&id, output).await,
-            Commands::Run { id } => cmd::run_workflow(&id).await,
-            Commands::Load { id } => cmd::load_workflow(&id).await,
-            Commands::Start { id } => cmd::start_workflow(&id).await,
-            Commands::Pause { id } => cmd::pause_workflow(&id).await,
-            Commands::Stop { id } => cmd::stop_workflow(&id).await,
+            // Engine
             Commands::Engine(engine_cli) => match engine_cli.command {
                 EngineCommands::Start => {
                     // Handle engine start command
@@ -113,6 +114,8 @@ impl Cli {
                     Ok(())
                 }
             },
+
+            // Config
             Commands::Config(config_cli) => match config_cli.command {
                 ConfigCommands::GetContext { current } => {
                     if current {
@@ -135,6 +138,15 @@ impl Cli {
                 }
                 ConfigCommands::GetContexts => cmd::list_contexts().await,
             },
+
+            Commands::List => cmd::list_workflows().await,
+            Commands::Get { id, output } => cmd::get_workflow(&id, output).await,
+            Commands::Run { id } => cmd::start_workflow(&id).await,
+            Commands::Start { id } => cmd::start_workflow(&id).await,
+            Commands::Pause { id } => cmd::pause_workflow(&id).await,
+            Commands::Stop { id } => cmd::stop_workflow(&id).await,
+            Commands::Remove { id } => cmd::remove_workflow(&id).await,
+            Commands::State { id } => cmd::get_workflow_state(&id).await,
             _ => {
                 eprintln!("Unknown command");
                 // self.display_help();

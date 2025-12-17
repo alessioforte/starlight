@@ -1,18 +1,19 @@
 use super::cfg::Component;
 use super::tasks;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic::Ordering::Relaxed};
-use std::{collections::HashMap, sync::atomic::AtomicBool};
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{RwLock, broadcast, watch};
 
 mod csv_reader;
 mod csv_writer;
 mod json_remapper;
-mod kafka_consumer;
+// mod kafka_consumer;
 mod kafka_producer;
 mod math_exp_eval;
 mod random_numbers_generator;
@@ -35,7 +36,7 @@ pub enum Tasks {
     MathExpEval,
     Simulator,
     KafkaProducer,
-    KafkaConsumer,
+    // KafkaConsumer,
     // HttpSender,
     // Scheduler,
 }
@@ -85,11 +86,10 @@ impl Tasks {
             Tasks::KafkaProducer => {
                 let task = tasks::kafka_producer::create(component, wiring);
                 task.spawn()
-            }
-            Tasks::KafkaConsumer => {
-                let task = tasks::kafka_consumer::create(component, wiring);
-                task.spawn()
-            }
+            } // Tasks::KafkaConsumer => {
+              //     let task = tasks::kafka_consumer::create(component, wiring);
+              //     task.spawn()
+              // }
         }
     }
 }
@@ -129,21 +129,21 @@ pub enum Status {
 /// It contains:
 /// - `id`: The identifier of the task that this handle belongs to
 /// - `tx`: A sender for outgoing data, wrapped in an `mpsc::UnboundedSender<Value>` to allow sending values without blocking.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct HandleSource {
     pub id: String,
-    pub tx: mpsc::UnboundedSender<Value>,
+    pub tx: broadcast::Sender<Value>,
 }
 
 /// Represents a target handle for receiving data from other tasks.
 ///
 /// It contains:
 /// - `id`: The identifier of the task that this handle belongs to
-/// - `rx`: A receiver for incoming data, wrapped in an `Arc<Mutex<>>` to allow shared ownership and mutable access across threads.
-#[derive(Debug, Clone)]
+/// - `tx`: A sender for incoming data, wrapped in a `broadcast::Sender<Value>` to allow broadcasting values to multiple receivers.
+#[derive(Debug)]
 pub struct HandleTarget {
     pub id: String,
-    pub rx: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
+    pub tx: broadcast::Sender<Value>,
 }
 
 /// Wiring structure that holds the communication channels and handles for a task.
@@ -153,12 +153,14 @@ pub struct HandleTarget {
 /// - `out_txs`: A map of output channels for sending data to other tasks, keyed by label
 /// - `in_rxs`: A map of input channels for receiving data from other tasks, keyed by task ID
 /// - The `ctx` field is commented out, but it could be used to hold additional context information if needed.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Wiring {
     pub cmd_rx: watch::Receiver<Command>,
-    pub state_tx: mpsc::UnboundedSender<Value>,
-    pub out_txs: HashMap<String, Vec<HandleSource>>,
-    pub in_rxs: HashMap<String, HandleTarget>,
+    // pub state_tx: mpsc::UnboundedSender<Value>,
+    pub out_txs: DashMap<String, Vec<HandleSource>>,
+    pub in_rxs: DashMap<String, HandleTarget>,
+    // pub out_txs: HashMap<String, Vec<HandleSource>>,
+    // pub in_rxs: HashMap<String, HandleTarget>,
     // pub ctx: Value, TODO
 }
 
@@ -175,8 +177,8 @@ pub struct Task<T, S> {
     id: String,
     params: T,
     state: S,
-    wiring: Wiring,
     leading: bool,
+    wiring: Arc<Wiring>,
     running: Arc<AtomicBool>,
     status: RwLock<Status>,
 }
@@ -197,7 +199,7 @@ impl<T, S> Task<T, S> {
         Task {
             id,
             params,
-            wiring,
+            wiring: Arc::new(wiring),
             leading,
             state: S::default(),
             status: RwLock::new(Status::Ready),
@@ -210,9 +212,15 @@ impl<T, S> Task<T, S> {
 pub trait Worker<T>: Send + Sync {
     fn id(&self) -> &str;
     fn name(&self) -> &str;
-    fn wiring(&self) -> &Wiring;
+    fn wiring(&self) -> Arc<Wiring>;
     fn running(&self) -> Arc<AtomicBool>;
     fn leading(&self) -> bool;
+    fn subscribe(&self, id: &str) -> broadcast::Receiver<Value> {
+        let wiring = self.wiring();
+        let handle = wiring.in_rxs.get(id).expect("Channel not found");
+        handle.tx.subscribe()
+    }
+
     async fn set_status(&self, status: Status);
 
     /// Spawns the task and returns a `JoinHandle` to manage its execution.
@@ -221,7 +229,8 @@ pub trait Worker<T>: Send + Sync {
     /// Executes the task logic.
     ///
     /// This method should be implemented by the task to define its behavior.
-    async fn execute(&self, channel: Option<&HandleTarget>);
+    // async fn execute(&self, channel: Option<&HandleTarget>);
+    async fn execute(&self, id: Option<&str>);
 
     /// This method is responsible for valuating if the task is leading or not.
     /// If the task is leading, it can execute immediately without waiting for input channels.
@@ -239,13 +248,20 @@ pub trait Worker<T>: Send + Sync {
         let wiring = self.wiring();
         let mut futures = FuturesUnordered::new();
 
-        for (_, channel) in wiring.in_rxs.iter() {
-            futures.push(self.execute(Some(channel)));
-        }
+        // for (_, channel) in wiring.in_rxs.iter() {
+        //     futures.push(self.execute(Some(channel)));
+        // }
+
+        wiring.in_rxs.iter().for_each(|channel| {
+            let task_ref = self;
+            futures.push(async move {
+                task_ref.execute(Some(channel.key())).await;
+            });
+        });
 
         loop {
             tokio::select! {
-                _ = futures.next() => {}
+                _ = futures.next() => {} // REVIEW: Is there a better way to handle this?
             }
         }
     }
@@ -317,8 +333,8 @@ macro_rules! task {
             fn name(&self) -> &str {
                 NAME
             }
-            fn wiring(&self) -> &Wiring {
-                &self.wiring
+            fn wiring(&self) -> Arc<Wiring> {
+                Arc::clone(&self.wiring)
             }
 
             fn running(&self) -> Arc<AtomicBool> {

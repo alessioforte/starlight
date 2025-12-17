@@ -26,6 +26,7 @@ impl Engine {
 
     /// Returns a list of all workflows with their IDs, names, and descriptions
     pub fn list(&self) -> Vec<WorkflowInfo> {
+        // FIXME: try to avoid cloning the workflow data
         self.workflows
             .iter()
             .map(|(id, workflow)| WorkflowInfo {

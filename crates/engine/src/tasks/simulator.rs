@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::ext::duration::DurationExt;
 use crate::task;
 use async_trait::async_trait;
@@ -34,8 +34,8 @@ pub struct State {}
 task! {
     Simulator,
     State,
-    async fn execute(&self, _channel: Option<&HandleTarget>) {
-        let out_txs = self.wiring.out_txs.clone();
+    async fn execute(&self, _id: Option<&str>) {
+        let wiring = self.wiring();
         let key = self.params.key.clone();
         let duration = Duration::parse(&self.params.interval).unwrap_or(Duration::from_millis(1000));
         let models = self.params.models.clone();
@@ -52,10 +52,10 @@ task! {
                 let _ = jb.set_value("timestamp", serde_json::json!(now));
                 let _ = jb.set_value(&key, serde_json::json!(value));
                 let data = jb.data();
-                let out = out_txs.get("out").unwrap();
-                for handle in out {
+                let out = wiring.out_txs.get("out").unwrap();
+                out.iter().for_each(|handle| {
                     let _ = handle.tx.send(data.clone());
-                }
+                });
                 thread::sleep(duration);
             }
             log::info!("Simulator task stopped");

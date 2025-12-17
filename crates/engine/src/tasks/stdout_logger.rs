@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -18,10 +18,11 @@ pub struct State {}
 task! {
     StdoutLogger,
     State,
-    async fn execute(&self, channel: Option<&HandleTarget>) {
-        let mut rx = channel.unwrap().rx.lock().await;
+    async fn execute(&self, id: Option<&str>) {
+        let id = id.unwrap();
+        let mut rx = self.subscribe(id);
         let format = self.params.format.clone();
-        while let Some(value) = rx.recv().await {
+        while let Ok(value) = rx.recv().await {
             let formatted = format.replace("{}", &value.to_string());
             println!("{formatted}");
         }

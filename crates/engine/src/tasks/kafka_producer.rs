@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use rdkafka::producer::{FutureProducer, FutureRecord};
@@ -21,14 +21,15 @@ pub struct State {}
 task! {
     KafkaProducer,
     State,
-    async fn execute(&self, channel: Option<&HandleTarget>) {
+    async fn execute(&self, id: Option<&str>) {
         let producer: FutureProducer = rdkafka::config::ClientConfig::new()
             .set("bootstrap.servers", &self.params.bootstrap_servers)
             .create()
             .expect("Producer creation failed");
 
-        let mut rx = channel.unwrap().rx.lock().await;
-        while let Some(payload) = rx.recv().await {
+        let id = id.unwrap();
+        let mut rx = self.subscribe(id);
+        while let Ok(payload) = rx.recv().await {
             let key = self.params.key.clone();
             let topic = self.params.topic.clone();
             let payload = serde_json::to_string(&payload)

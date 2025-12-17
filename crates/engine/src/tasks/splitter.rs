@@ -1,4 +1,4 @@
-use super::{HandleTarget, Status, Task, Wiring, Worker};
+use super::{Status, Task, Wiring, Worker};
 use crate::task;
 use async_trait::async_trait;
 use jb::JsonBuilder;
@@ -26,9 +26,11 @@ pub struct State {}
 task! {
     Splitter,
     State,
-    async fn execute(&self, channel: Option<&HandleTarget>) {
-        let mut rx = channel.unwrap().rx.lock().await;
-        while let Some(payload) = rx.recv().await {
+    async fn execute(&self, id: Option<&str>) {
+        let wiring = self.wiring();
+        let id = id.unwrap();
+        let mut rx = self.subscribe(id);
+        while let Ok(payload) = rx.recv().await {
             let rules = self.params.rules.clone();
             let obj = payload.as_object().unwrap();
             for rule in rules.iter() {
@@ -49,11 +51,10 @@ task! {
                     }
                 }
 
-                let out_txs = self.wiring.out_txs.clone();
-                let out = out_txs.get("out").unwrap();
-                for handle in out {
+                let out = wiring.out_txs.get("out").unwrap();
+                out.iter().for_each(|handle| {
                     let _ = handle.tx.send(jb.data().clone());
-                }
+                });
             }
         }
     }

@@ -1,15 +1,27 @@
+[package]
+name = "starlight"
+version = "0.1.0"
+description = "High Frequency Workflow Engine"
+authors = ["Alessio Forte <fortealessio@gmail.com>"]
+edition = "2024"
+readme = "README.md"
+license = "" # TODO: add license
+
 [workspace]
-resolver = "2"
-members = [ "crates/cli", "crates/engine", "crates/starlight", "crates/jb", "crates/simulator"]
+members = [
+    "crates/cli",
+    "crates/engine",
+    "crates/jb",
+    "crates/simulator",
+    "crates/simple_engine"
+, "crates/eng"]
 
 [workspace.package]
 version = "0.1.0"
-authors = [
-    "Alessio Forte <fortealessio@gmail.com>",
-]
+authors = ["Alessio Forte <fortealessio@gmail.com>"]
 description = "High Frequency Workflow Engine"
-readme = "README.md"
 edition = "2024"
+readme = "README.md"
 license = "" # TODO: add license
 
 [profile.dev]
@@ -18,3 +30,17 @@ debug = 1 # less precise locations
 [profile.dev.package."*"]
 debug = false # no debug symbols for deps
 opt-level = 2 # this makes their code smaller too
+
+[dependencies]
+axum = "0.8.4"
+console-subscriber = "0.4.1"
+dotenvy = "0.15.7"
+eng = { path = "crates/eng" }
+engine = { path = "crates/engine" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["preserve_order"] }
+serde_yaml_bw = "2.4.0"
+simulator = { path = "crates/simulator" }
+tokio = { version = "1.45.0", features = ["rt-multi-thread", "signal", "sync", "tracing"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
