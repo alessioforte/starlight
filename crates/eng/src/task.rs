@@ -411,12 +411,6 @@ impl TaskRunner {
     }
 }
 
-/// Type alias for task factory functions
-///
-/// This is used when registering tasks with the workflow builder.
-pub type TaskFactory =
-    Box<dyn Fn(String, serde_json::Value) -> Result<Box<dyn Task>> + Send + Sync>;
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,8 +11,10 @@ struct EngineCli {
 enum EngineCommands {
     /// Start the engine
     Start,
+
     /// Stop the engine
     Stop,
+
     /// Show the status of the engine
     Status,
 }
@@ -40,10 +42,14 @@ enum ConfigCommands {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Configuration management commands
     #[command(name = "config", subcommand_help_heading = "Config Commands")]
     Config(ConfigCli),
+
+    /// Engine management commands
     #[command(name = "engine", subcommand_help_heading = "Engine Commands")]
     Engine(EngineCli),
+
     /// Load a single workflow file or a directory
     Push {
         #[arg(short, long)]
@@ -52,21 +58,23 @@ enum Commands {
         #[arg(short, long)]
         dir: Option<String>,
     },
+
     /// List all loaded workflows
     #[clap(alias = "ls")]
     List,
-    // Load {
-    //     /// Load a workflow by its ID
-    //     id: String,
-    // },
+
     /// Run a workflow
     Run { id: String },
+
     /// Start a workflow
     Start { id: String },
+
     /// Pause a workflow
     Pause { id: String },
+
     /// Stop a workflow
     Stop { id: String },
+
     /// Delete a workflow
     #[clap(alias = "rm")]
     Remove { id: String },
@@ -75,8 +83,10 @@ enum Commands {
 
     /// Get the state of a workflow
     State { id: String },
+
     /// Describe a workflow
     Describe { id: String },
+
     /// Get details of a workflow
     Get {
         id: String,
@@ -149,7 +159,6 @@ impl Cli {
             Commands::State { id } => cmd::get_workflow_state(&id).await,
             _ => {
                 eprintln!("Unknown command");
-                // self.display_help();
                 Err(anyhow::anyhow!("Unknown command"))
             }
         }

@@ -1,5 +1,7 @@
 /target
 .snippets
+.claude
+.cargo
 
 .DS_Store
 NOTE.md

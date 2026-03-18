@@ -4,9 +4,15 @@ mod json_mapper;
 mod logger;
 mod number_generator;
 
+use crate::err::Result;
+use crate::task::Task;
 use serde::{Deserialize, Serialize};
 
-use crate::task::TaskFactory;
+/// Type alias for task factory functions
+///
+/// This is used when registering tasks with the workflow builder.
+pub type TaskFactory =
+    Box<dyn Fn(String, serde_json::Value) -> Result<Box<dyn Task>> + Send + Sync>;
 
 /// Represents the different types of tasks that can be executed in the workflow.
 #[derive(Debug, Clone, Deserialize, Serialize)]
