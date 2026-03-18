@@ -9,6 +9,7 @@ tasks:
     params:
       min: 1
       max: 10
+      interval_ms: 200
     outputs:
       out:
         - small_numbers

@@ -92,6 +92,7 @@ impl Task for CsvReader {
             params: serde_json::to_value(&self.base.params).unwrap_or(json!({})),
             state: serde_json::to_value(&self.base.state).unwrap_or(json!({})),
             status: current_status,
+            metrics: None,
         }
     }
 
@@ -153,10 +154,10 @@ impl Task for CsvReader {
         // Process records
         let mut records_sent = 0;
         while let Some(line) = lines.next_line().await? {
-            // Check if we should continue running
-            if !ctx.is_running() {
+            // Blocks while paused, returns false when stopped
+            if !ctx.running().await {
                 tracing::debug!(
-                    "CSV Reader [{}]: Paused at line {}",
+                    "CSV Reader [{}]: Stopped at line {}",
                     self.base.id,
                     state.current_line.load(Ordering::Relaxed)
                 );
@@ -198,8 +199,8 @@ impl Task for CsvReader {
                 record.insert(header.clone(), json_value);
             }
 
-            // Send to output
-            output.send(Value::Object(record))?;
+            // Send to output (async — applies backpressure)
+            output.send(Value::Object(record)).await?;
             records_sent += 1;
 
             // Update state

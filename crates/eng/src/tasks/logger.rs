@@ -148,12 +148,13 @@ impl Task for Logger {
             params: serde_json::to_value(&self.base.params).unwrap_or(json!({})),
             state: serde_json::to_value(&self.base.state).unwrap_or(json!({})),
             status: current_status,
+            metrics: None,
         }
     }
 
     async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
         // Get merged input from all channels (receives from all dependencies)
-        let mut input = ctx.merged_input()?;
+        let mut input = ctx.merged_input().await?;
 
         tracing::info!(
             "Logger [{}]: Started (level: {}, pretty: {})",
@@ -163,7 +164,7 @@ impl Task for Logger {
         );
 
         // Process incoming messages
-        while ctx.is_running() {
+        while ctx.running().await {
             match input.recv().await {
                 Ok(value) => {
                     let message = self.format_message(&value);
@@ -176,11 +177,9 @@ impl Task for Logger {
                         tracing::debug!("Logger [{}]: Logged {} messages", self.base.id, count);
                     }
                 }
-                Err(e) => {
-                    if !ctx.is_running() {
-                        break;
-                    }
-                    tracing::error!("Logger [{}]: Receive error: {}", self.base.id, e);
+                Err(_) => {
+                    // Channel closed — all upstream producers finished
+                    tracing::debug!("Logger [{}]: Input channel closed", self.base.id);
                     break;
                 }
             }

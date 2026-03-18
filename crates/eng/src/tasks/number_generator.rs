@@ -102,6 +102,7 @@ impl Task for NumberGenerator {
             params: serde_json::to_value(&self.base.params).unwrap_or(json!({})),
             state: serde_json::to_value(&self.base.state).unwrap_or(json!({})),
             status: current_status,
+            metrics: None,
         }
     }
 
@@ -140,7 +141,7 @@ impl Task for NumberGenerator {
         );
 
         // Generate numbers
-        while ctx.is_running() {
+        while ctx.running().await {
             let current_count = state.generated.load(Ordering::Relaxed);
 
             // Check if we've reached the limit
@@ -158,15 +159,14 @@ impl Task for NumberGenerator {
             // Generate random number
             let number = rng.random_range(params.min..=params.max);
 
-            // Create output object
+            // Create output object (timestamp comes from the coarse clock — no syscall)
             let data = json!({
                 "value": number,
                 "index": current_count,
-                "timestamp": chrono::Utc::now().timestamp_millis()
             });
 
-            // Send to output
-            output.send(data)?;
+            // Send to output (async — applies backpressure)
+            output.send(data).await?;
 
             // Update state
             state.generated.fetch_add(1, Ordering::Relaxed);

@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// Dummy Task parameters
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Params;
+pub struct Params {}
 
 /// Dummy Task state
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -64,20 +64,17 @@ impl Task for Dummy {
             params: serde_json::to_value(&self.base.params).unwrap_or(json!({})),
             state: serde_json::to_value(&self.base.state).unwrap_or(json!({})),
             status: current_status,
+            metrics: None,
         }
     }
 
     async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
-        let _params = &self.base.params;
-
-        // Get merged input from all channels (receives from all dependencies)
-        let mut _input = ctx.merged_input()?;
-        let output = ctx.output("out")?;
-
         tracing::info!("Starting Dummy task {}", self.base.id);
 
-        // Send a single "done" message
-        output.send(json!({"status": "done"}))?;
+        // Send a single "done" message if an output is configured
+        if let Ok(output) = ctx.output("out") {
+            output.send(json!({"status": "done"})).await?;
+        }
 
         tracing::info!("Dummy task {} completed", self.base.id);
 

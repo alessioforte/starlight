@@ -110,15 +110,6 @@ impl EngineError {
     }
 }
 
-/// Convert from broadcast receive errors
-impl From<tokio::sync::broadcast::error::RecvError> for EngineError {
-    fn from(err: tokio::sync::broadcast::error::RecvError) -> Self {
-        EngineError::Channel(ChannelError::RecvFailed(
-            "unknown".to_string(),
-            err.to_string(),
-        ))
-    }
-}
 
 /// Convert from task join errors
 impl From<tokio::task::JoinError> for EngineError {

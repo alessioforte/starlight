@@ -5,12 +5,14 @@
 use crate::cfg::TaskConfig;
 use crate::ctx::TaskContext;
 use crate::err::{EngineError, Result, WorkflowError};
+use crate::metrics::CoarseClock;
 use crate::task::{Command, Task, TaskInfo, TaskRunner};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, watch};
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 /// Workflow status
@@ -62,6 +64,9 @@ pub struct Workflow {
     /// Task handles for accessing state (task_id -> Arc<Box<dyn Task>>)
     task_handles: HashMap<String, Arc<Box<dyn Task>>>,
 
+    /// Task contexts for metrics access (task_id -> TaskContext)
+    contexts: HashMap<String, Arc<TaskContext>>,
+
     /// Current workflow status
     status: Arc<tokio::sync::RwLock<WorkflowStatus>>,
 }
@@ -83,11 +88,15 @@ impl Workflow {
     //     self.status.read().await.clone()
     // }
 
-    /// Get information about all tasks in the workflow
+    /// Get information about all tasks in the workflow, including live metrics
     pub fn state(&self) -> Vec<TaskInfo> {
         let mut infos = Vec::new();
-        for (_, task) in &self.task_handles {
-            let info = task.get_info();
+        for (task_id, task) in &self.task_handles {
+            let mut info = task.get_info();
+            // Inject live metrics from the task's context
+            if let Some(ctx) = self.contexts.get(task_id) {
+                info.metrics = Some(ctx.metrics());
+            }
             infos.push(info);
         }
         infos
@@ -164,6 +173,8 @@ pub struct WorkflowBuilder {
     description: Option<String>,
     tasks: Vec<TaskConfig>,
     channel_capacity: usize,
+    /// Update interval for the shared coarse clock (default: 100ms)
+    clock_interval: Duration,
 }
 
 impl WorkflowBuilder {
@@ -175,6 +186,7 @@ impl WorkflowBuilder {
             description: None,
             tasks: Vec::new(),
             channel_capacity: 1000,
+            clock_interval: Duration::from_millis(100),
         }
     }
 
@@ -204,6 +216,16 @@ impl WorkflowBuilder {
         self
     }
 
+    /// Set the update interval for the shared coarse clock
+    ///
+    /// Default is 100 ms. Lower values give finer timestamp resolution
+    /// but cost one syscall per tick.
+    #[allow(dead_code)]
+    pub fn clock_interval(mut self, interval: Duration) -> Self {
+        self.clock_interval = interval;
+        self
+    }
+
     /// Build the workflow
     ///
     /// This validates the configuration, creates all channels,
@@ -214,27 +236,65 @@ impl WorkflowBuilder {
 
         let (cmd_tx, _) = watch::channel(Command::Pause);
         let status = Arc::new(tokio::sync::RwLock::new(WorkflowStatus::Idle));
-
-        // Create broadcast channels for inter-task communication
-        let mut channels: HashMap<String, broadcast::Sender<Value>> = HashMap::new();
-
         let mut task_handles: HashMap<String, Arc<Box<dyn Task>>> = HashMap::new();
 
-        // Create channels for all output channel IDs
-        // Each output channel ID from the task configs needs a broadcast channel
+        // Start a shared coarse clock for all tasks in this workflow
+        let clock = CoarseClock::start(self.clock_interval);
+
+        // ---------------------------------------------------------
+        // 1. Map channel_id → list of consuming task IDs
+        // ---------------------------------------------------------
+        let mut channel_consumers: HashMap<String, Vec<String>> = HashMap::new();
         for task in &self.tasks {
-            for (_label, channel_ids) in &task.outputs {
+            for dep_channel_id in &task.dependencies {
+                channel_consumers
+                    .entry(dep_channel_id.clone())
+                    .or_default()
+                    .push(task.id.clone());
+            }
+        }
+
+        // ---------------------------------------------------------
+        // 2. For each (channel_id, consumer) pair create one mpsc channel.
+        //    Collect senders for producers, receivers for consumers.
+        // ---------------------------------------------------------
+        // producer task id → output label → Vec<mpsc::Sender>
+        let mut producer_senders: HashMap<String, HashMap<String, Vec<mpsc::Sender<Value>>>> =
+            HashMap::new();
+        // consumer task id → channel_id → mpsc::Receiver
+        let mut consumer_receivers: HashMap<String, HashMap<String, mpsc::Receiver<Value>>> =
+            HashMap::new();
+
+        for task in &self.tasks {
+            for (label, channel_ids) in &task.outputs {
                 for channel_id in channel_ids {
-                    channels
-                        .entry(channel_id.clone())
-                        .or_insert_with(|| broadcast::channel(self.channel_capacity).0);
+                    let consumers = channel_consumers
+                        .get(channel_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    for consumer_task_id in consumers {
+                        let (tx, rx) = mpsc::channel(self.channel_capacity);
+                        producer_senders
+                            .entry(task.id.clone())
+                            .or_default()
+                            .entry(label.clone())
+                            .or_default()
+                            .push(tx);
+                        consumer_receivers
+                            .entry(consumer_task_id)
+                            .or_default()
+                            .insert(channel_id.clone(), rx);
+                    }
                 }
             }
         }
 
+        // ---------------------------------------------------------
+        // 3. Instantiate and spawn each task
+        // ---------------------------------------------------------
         let mut handles = Vec::new();
+        let mut contexts: HashMap<String, Arc<TaskContext>> = HashMap::new();
 
-        // Spawn each task
         for task_config in self.tasks {
             let factory = task_config.kind.to_factory();
             let task_instance =
@@ -245,52 +305,32 @@ impl WorkflowBuilder {
                     ))
                 })?;
 
-            // Build input map (channels this task reads from)
-            // Key: channel ID from dependencies
-            // Value: broadcast sender for that channel
-            let mut inputs = HashMap::new();
-            for channel_id in &task_config.dependencies {
-                let sender = channels.get(channel_id).ok_or_else(|| {
-                    EngineError::Workflow(WorkflowError::InvalidConfig(
-                        self.id.clone(),
-                        format!(
-                            "Input channel '{}' not found for task '{}'. Make sure an upstream task outputs to this channel.",
-                            channel_id, task_config.id
-                        ),
-                    ))
-                })?;
-                inputs.insert(channel_id.clone(), sender.clone());
-            }
+            // Inputs: receivers for this task
+            let inputs = consumer_receivers
+                .remove(&task_config.id)
+                .unwrap_or_default();
 
-            // Build output map (channels this task writes to)
-            // Key: output label (e.g., "out")
-            // Value: list of broadcast senders for each channel ID
-            let mut outputs = HashMap::new();
-            for (label, channel_ids) in &task_config.outputs {
-                let mut senders = Vec::new();
-                for channel_id in channel_ids {
-                    let sender = channels.get(channel_id).ok_or_else(|| {
-                        EngineError::Workflow(WorkflowError::InvalidConfig(
-                            self.id.clone(),
-                            format!(
-                                "Output channel '{}' not found for task '{}' output label '{}'",
-                                channel_id, task_config.id, label
-                            ),
-                        ))
-                    })?;
-                    senders.push(sender.clone());
-                }
-                outputs.insert(label.clone(), senders);
-            }
+            // Outputs: senders from this task
+            let outputs = producer_senders
+                .remove(&task_config.id)
+                .unwrap_or_default();
 
-            // Create task context
-            let context = TaskContext::new(task_config.id.clone(), inputs, outputs);
+            // Create task context with the configured channel capacity and shared clock
+            let context = TaskContext::with_capacity(
+                task_config.id.clone(),
+                inputs,
+                outputs,
+                self.channel_capacity,
+                Some(clock.clone()),
+            );
 
             // Create task runner
             let runner = TaskRunner::new(task_instance, context, cmd_tx.subscribe());
 
             let task_handle = runner.task_handle();
+            let ctx_handle = runner.context_handle();
             task_handles.insert(task_config.id.clone(), task_handle);
+            contexts.insert(task_config.id.clone(), ctx_handle);
 
             // Spawn the task
             handles.push(tokio::spawn(runner.run()));
@@ -306,6 +346,7 @@ impl WorkflowBuilder {
             description: self.description,
             cmd_tx,
             task_handles,
+            contexts,
             handles,
             status,
         })

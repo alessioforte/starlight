@@ -5,6 +5,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::{EngineError, Result};
+use crate::metrics::MetricsSnapshot;
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,7 @@ pub struct TaskInfo {
     pub state: Value,
     pub params: Value,
     pub status: Option<String>,
+    pub metrics: Option<MetricsSnapshot>,
 }
 
 /// Main task trait that all tasks must implement
@@ -65,96 +67,41 @@ pub trait Task: Send + Sync + 'static {
     /// # Typical Patterns
     ///
     /// ## Source Task (no inputs)
-    /// ```no_run
-    /// # use simple_engine::prelude::*;
-    /// # use serde_json::json;
-    /// # struct MyTask;
-    /// # #[async_trait]
-    /// # impl Task for MyTask {
-    /// # fn name(&self) -> &str { "MyTask" }
+    /// ```ignore
     /// async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
     ///     let output = ctx.output("out")?;
-    ///
-    ///     while ctx.is_running() {
+    ///     while ctx.running().await {
     ///         let data = json!({"generated": "data"});
-    ///         output.send(data)?;
-    ///         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    ///         output.send(data).await?;
+    ///         tokio::time::sleep(Duration::from_secs(1)).await;
     ///     }
     ///     Ok(())
     /// }
-    /// # }
     /// ```
     ///
     /// ## Processing Task (inputs and outputs)
-    /// ```no_run
-    /// # use simple_engine::prelude::*;
-    /// # struct MyTask;
-    /// # #[async_trait]
-    /// # impl Task for MyTask {
-    /// # fn name(&self) -> &str { "MyTask" }
+    /// ```ignore
     /// async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
-    ///     // Get merged input from all channels (receives from all dependencies)
-    ///     let mut input = ctx.merged_input()?;
+    ///     let mut input = ctx.merged_input().await?;
     ///     let output = ctx.output("out")?;
-    ///
-    ///     while ctx.is_running() {
+    ///     while ctx.running().await {
     ///         let data = input.recv().await?;
-    ///         // Process data...
-    ///         output.send(data)?;
+    ///         output.send(data).await?;
     ///     }
     ///     Ok(())
     /// }
-    /// # }
     /// ```
     ///
     /// ## Sink Task (no outputs)
-    /// ```no_run
-    /// # use simple_engine::prelude::*;
-    /// # struct MyTask;
-    /// # #[async_trait]
-    /// # impl Task for MyTask {
-    /// # fn name(&self) -> &str { "MyTask" }
+    /// ```ignore
     /// async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
-    ///     // Get merged input from all channels (receives from all dependencies)
-    ///     let mut input = ctx.merged_input()?;
-    ///
-    ///     while ctx.is_running() {
+    ///     let mut input = ctx.merged_input().await?;
+    ///     while ctx.running().await {
     ///         let data = input.recv().await?;
     ///         // Store or log data...
     ///     }
     ///     Ok(())
     /// }
-    /// # }
-    /// ```
-    ///
-    /// ## Advanced: Manual Multi-Input Processing
-    ///
-    /// For advanced use cases where you need separate control over each input channel:
-    ///
-    /// ```no_run
-    /// # use simple_engine::prelude::*;
-    /// # struct MyTask;
-    /// # #[async_trait]
-    /// # impl Task for MyTask {
-    /// # fn name(&self) -> &str { "MyTask" }
-    /// async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
-    ///     // Get all input channels separately for manual control
-    ///     let mut inputs = ctx.inputs()?;
-    ///     let output = ctx.output("out")?;
-    ///
-    ///     while ctx.is_running() {
-    ///         // Poll each channel independently
-    ///         for input in &mut inputs {
-    ///             if let Ok(Some(data)) = input.try_recv() {
-    ///                 // Process with knowledge of which channel it came from
-    ///                 output.send(data)?;
-    ///             }
-    ///         }
-    ///         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    ///     }
-    ///     Ok(())
-    /// }
-    /// # }
     /// ```
     async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()>;
 
@@ -188,6 +135,7 @@ pub trait Task: Send + Sync + 'static {
             state: serde_json::json!({}),
             params: serde_json::json!({}),
             status: None,
+            metrics: None,
         }
     }
 
@@ -268,6 +216,10 @@ impl TaskRunner {
         Arc::clone(&self.task)
     }
 
+    pub fn context_handle(&self) -> Arc<TaskContext> {
+        Arc::clone(&self.context)
+    }
+
     // /// Get current task status
     // pub async fn status(&self) -> TaskStatus {
     //     self.status.read().await.clone()
@@ -290,118 +242,103 @@ impl TaskRunner {
         tracing::info!("Task [{task_name}]-{task_id} initialized");
         self.set_status(TaskStatus::Idle).await;
 
+        // Wait for the first Start command before doing anything
         loop {
-            // Wait for commands
             if let Err(e) = self.cmd_rx.changed().await {
                 tracing::error!("Task [{task_name}]-{task_id} command channel closed: {}", e);
-                break;
+                return;
             }
 
             let cmd = self.cmd_rx.borrow().clone();
-
             match cmd {
-                Command::Start => {
-                    tracing::info!("Task [{task_name}]-{task_id} starting");
-                    self.set_status(TaskStatus::Running).await;
-                    self.context.set_running(true);
-
-                    // Call on_start hook
-                    if let Err(e) = self.task.on_start(Arc::clone(&self.context)).await {
-                        tracing::error!("Task [{task_name}]-{task_id} on_start failed: {}", e);
-                        self.set_status(TaskStatus::Failed(e.to_string())).await;
-                        continue;
-                    }
-
-                    // Spawn task execution in a separate async task so we can monitor for commands
-                    let task_ref = &self.task;
-                    let ctx_clone = Arc::clone(&self.context);
-                    let execute_future = task_ref.execute(ctx_clone);
-
-                    // Race between task execution and command changes
-                    tokio::pin!(execute_future);
-
-                    loop {
-                        tokio::select! {
-                            result = &mut execute_future => {
-                                // Task execution completed
-                                match result {
-                                    Ok(_) => {
-                                        tracing::info!("Task [{task_name}]-{task_id} completed successfully");
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Task [{task_name}]-{task_id} execution failed: {}", e);
-                                        self.set_status(TaskStatus::Failed(e.to_string())).await;
-                                    }
-                                }
-                                self.context.set_running(false);
-                                break;
-                            }
-
-                            cmd_result = self.cmd_rx.changed() => {
-                                // New command received while task is executing
-                                if cmd_result.is_err() {
-                                    tracing::error!("Task [{task_name}]-{task_id} command channel closed during execution");
-                                    self.context.set_running(false);
-                                    break;
-                                }
-
-                                let new_cmd = self.cmd_rx.borrow().clone();
-                                match new_cmd {
-                                    Command::Pause => {
-                                        tracing::info!("Task [{task_name}]-{task_id} received pause during execution");
-                                        self.context.set_running(false);
-                                        self.set_status(TaskStatus::Paused).await;
-
-                                        // Call on_pause hook
-                                        if let Err(e) = self.task.on_pause(Arc::clone(&self.context)).await {
-                                            tracing::error!("Task [{task_name}]-{task_id} on_pause failed: {}", e);
-                                        }
-                                        break;
-                                    }
-                                    Command::Stop => {
-                                        tracing::info!("Task [{task_name}]-{task_id} received stop during execution");
-                                        self.context.set_running(false);
-                                        self.set_status(TaskStatus::Stopped).await;
-
-                                        // Call on_stop hook
-                                        if let Err(e) = self.task.on_stop(Arc::clone(&self.context)).await {
-                                            tracing::error!("Task [{task_name}]-{task_id} on_stop failed: {}", e);
-                                        }
-
-                                        // Exit the outer loop to shutdown
-                                        tracing::info!("Task [{task_name}]-{task_id} shutdown complete");
-                                        // return;
-                                        break;
-                                    }
-                                    Command::Start => {
-                                        // Already running, ignore
-                                        tracing::debug!("Task [{task_name}]-{task_id} received start while already running");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Command::Pause => {
-                    tracing::info!("Task [{task_name}]-{task_id} pausing");
-                    self.context.set_running(false);
-                    self.set_status(TaskStatus::Paused).await;
-
-                    // Call on_pause hook
-                    if let Err(e) = self.task.on_pause(Arc::clone(&self.context)).await {
-                        tracing::error!("Task [{task_name}]-{task_id} on_pause failed: {}", e);
-                    }
-                }
-
+                Command::Start => break,
                 Command::Stop => {
-                    tracing::info!("Task [{task_name}]-{task_id} stopping");
-                    self.context.set_running(false);
+                    tracing::info!("Task [{task_name}]-{task_id} stopped before starting");
+                    self.context.stop();
                     self.set_status(TaskStatus::Stopped).await;
-
-                    // Call on_stop hook
                     if let Err(e) = self.task.on_stop(Arc::clone(&self.context)).await {
                         tracing::error!("Task [{task_name}]-{task_id} on_stop failed: {}", e);
+                    }
+                    return;
+                }
+                Command::Pause => {
+                    // Not started yet, ignore pause
+                    tracing::debug!("Task [{task_name}]-{task_id} received pause while idle");
+                }
+            }
+        }
+
+        // --- First Start: launch execute() ---
+        tracing::info!("Task [{task_name}]-{task_id} starting");
+        self.set_status(TaskStatus::Running).await;
+        self.context.resume();
+
+        if let Err(e) = self.task.on_start(Arc::clone(&self.context)).await {
+            tracing::error!("Task [{task_name}]-{task_id} on_start failed: {}", e);
+            self.set_status(TaskStatus::Failed(e.to_string())).await;
+            return;
+        }
+
+        let task_ref = &self.task;
+        let ctx_clone = Arc::clone(&self.context);
+        let execute_future = task_ref.execute(ctx_clone);
+        tokio::pin!(execute_future);
+
+        // --- Main select loop: keep execute_future alive across pause/resume ---
+        loop {
+            tokio::select! {
+                result = &mut execute_future => {
+                    // Task execution completed (naturally or because ctx.running() returned false)
+                    match result {
+                        Ok(_) => {
+                            tracing::info!("Task [{task_name}]-{task_id} completed successfully");
+                            self.set_status(TaskStatus::Stopped).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("Task [{task_name}]-{task_id} execution failed: {}", e);
+                            self.set_status(TaskStatus::Failed(e.to_string())).await;
+                        }
+                    }
+                    self.context.stop();
+                    break;
+                }
+
+                cmd_result = self.cmd_rx.changed() => {
+                    if cmd_result.is_err() {
+                        tracing::error!("Task [{task_name}]-{task_id} command channel closed");
+                        self.context.stop();
+                        break;
+                    }
+
+                    let new_cmd = self.cmd_rx.borrow().clone();
+                    match new_cmd {
+                        Command::Pause => {
+                            tracing::info!("Task [{task_name}]-{task_id} pausing");
+                            self.context.pause();
+                            self.set_status(TaskStatus::Paused).await;
+
+                            if let Err(e) = self.task.on_pause(Arc::clone(&self.context)).await {
+                                tracing::error!("Task [{task_name}]-{task_id} on_pause failed: {}", e);
+                            }
+                            // Do NOT break — the execute_future stays alive,
+                            // blocked inside ctx.running().await
+                        }
+                        Command::Start => {
+                            tracing::info!("Task [{task_name}]-{task_id} resuming");
+                            self.context.resume();
+                            self.set_status(TaskStatus::Running).await;
+                            // The task unblocks from ctx.running().await automatically
+                        }
+                        Command::Stop => {
+                            tracing::info!("Task [{task_name}]-{task_id} stopping");
+                            self.context.stop();
+                            self.set_status(TaskStatus::Stopped).await;
+
+                            if let Err(e) = self.task.on_stop(Arc::clone(&self.context)).await {
+                                tracing::error!("Task [{task_name}]-{task_id} on_stop failed: {}", e);
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -426,7 +363,7 @@ mod tests {
     #[async_trait]
     impl Task for TestTask {
         async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
-            while ctx.is_running() {
+            while ctx.running().await {
                 self.counter.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }

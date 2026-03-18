@@ -121,6 +121,7 @@ impl Task for JsonMapper {
             params: serde_json::to_value(&self.base.params).unwrap_or(json!({})),
             state: serde_json::to_value(&self.base.state).unwrap_or(json!({})),
             status: current_status,
+            metrics: None,
         }
     }
 
@@ -128,7 +129,7 @@ impl Task for JsonMapper {
         let params = &self.base.params;
 
         // Get merged input from all channels (receives from all dependencies)
-        let mut input = ctx.merged_input()?;
+        let mut input = ctx.merged_input().await?;
         let output = ctx.output("out")?;
 
         tracing::info!(
@@ -140,7 +141,7 @@ impl Task for JsonMapper {
         let mut processed = 0;
 
         // Process messages
-        while ctx.is_running() {
+        while ctx.running().await {
             match input.recv().await {
                 Ok(value) => {
                     let mut result = if params.pass_through {
@@ -166,8 +167,8 @@ impl Task for JsonMapper {
                         }
                     }
 
-                    // Send to output
-                    output.send(result)?;
+                    // Send to output (async — applies backpressure)
+                    output.send(result).await?;
                     processed += 1;
 
                     if processed % 1000 == 0 {
@@ -178,11 +179,9 @@ impl Task for JsonMapper {
                         );
                     }
                 }
-                Err(e) => {
-                    if !ctx.is_running() {
-                        break;
-                    }
-                    tracing::error!("JSON Mapper [{}]: Receive error: {}", self.base.id, e);
+                Err(_) => {
+                    // Channel closed — all upstream producers finished
+                    tracing::debug!("JSON Mapper [{}]: Input channel closed", self.base.id);
                     break;
                 }
             }
