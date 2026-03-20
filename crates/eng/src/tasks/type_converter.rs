@@ -5,6 +5,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
+use jb::{get, get_mut, remove};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -183,68 +184,6 @@ fn convert(value: &Value, target: &TargetType) -> Option<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Nested field helpers
-// ---------------------------------------------------------------------------
-
-/// Get a mutable reference to a nested field, creating intermediate objects
-/// as needed. Returns `None` only if a non-object intermediate exists.
-fn get_nested_mut<'a>(root: &'a mut Value, path: &str) -> Option<&'a mut Value> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = root;
-    for part in &parts {
-        match current {
-            Value::Object(map) => {
-                current = map.entry(part.to_string()).or_insert(Value::Null);
-            }
-            _ => return None,
-        }
-    }
-    Some(current)
-}
-
-/// Get an immutable reference to a nested value.
-fn get_nested<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').fold(Some(value), |acc, key| {
-        acc.and_then(|v| match v {
-            Value::Object(map) => map.get(key),
-            Value::Array(arr) => key.parse::<usize>().ok().and_then(|i| arr.get(i)),
-            _ => None,
-        })
-    })
-}
-
-/// Remove a nested field. Returns `true` if the field was found and removed.
-fn remove_nested(root: &mut Value, path: &str) -> bool {
-    let parts: Vec<&str> = path.split('.').collect();
-    if parts.is_empty() {
-        return false;
-    }
-    if parts.len() == 1 {
-        return match root {
-            Value::Object(map) => map.remove(parts[0]).is_some(),
-            _ => false,
-        };
-    }
-    // Navigate to parent
-    let parent_path = &parts[..parts.len() - 1];
-    let leaf = parts[parts.len() - 1];
-    let mut current = root;
-    for part in parent_path {
-        match current {
-            Value::Object(map) => match map.get_mut(*part) {
-                Some(v) => current = v,
-                None => return false,
-            },
-            _ => return false,
-        }
-    }
-    match current {
-        Value::Object(map) => map.remove(leaf).is_some(),
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Task implementation
 // ---------------------------------------------------------------------------
 
@@ -287,20 +226,20 @@ impl TypeConverter {
     /// Apply all conversions to a message (in place).
     fn apply(&self, msg: &mut Value) {
         for conv in &self.base.params.conversions {
-            let existing = get_nested(msg, &conv.field).cloned();
+            let existing = get(msg, &conv.field).cloned();
 
             match existing {
                 Some(val) => {
                     match convert(&val, &conv.target) {
                         Some(new_val) => {
-                            if let Some(slot) = get_nested_mut(msg, &conv.field) {
+                            if let Some(slot) = get_mut(msg, &conv.field) {
                                 *slot = new_val;
                             }
                         }
                         None => {
                             // Conversion failed
                             if conv.remove_on_error {
-                                remove_nested(msg, &conv.field);
+                                remove(msg, &conv.field);
                             }
                             // else: leave original value
                         }
@@ -309,7 +248,7 @@ impl TypeConverter {
                 None => {
                     // Field missing
                     if let MissingField::InsertNull = self.base.params.on_missing {
-                        if let Some(slot) = get_nested_mut(msg, &conv.field) {
+                        if let Some(slot) = get_mut(msg, &conv.field) {
                             *slot = Value::Null;
                         }
                     }
@@ -550,30 +489,30 @@ mod tests {
     #[test]
     fn test_get_nested_mut_creates_intermediate() {
         let mut msg = json!({"a": {}});
-        let slot = get_nested_mut(&mut msg, "a.b");
+        let slot = get_mut(&mut msg, "a.b");
         assert!(slot.is_some());
         *slot.unwrap() = json!(42);
         assert_eq!(msg, json!({"a": {"b": 42}}));
     }
 
     #[test]
-    fn test_remove_nested() {
+    fn test_remove() {
         let mut msg = json!({"a": {"b": 1, "c": 2}});
-        assert!(remove_nested(&mut msg, "a.b"));
+        assert!(remove(&mut msg, "a.b"));
         assert_eq!(msg, json!({"a": {"c": 2}}));
     }
 
     #[test]
     fn test_remove_nested_top_level() {
         let mut msg = json!({"x": 1, "y": 2});
-        assert!(remove_nested(&mut msg, "x"));
+        assert!(remove(&mut msg, "x"));
         assert_eq!(msg, json!({"y": 2}));
     }
 
     #[test]
     fn test_remove_nested_missing() {
         let mut msg = json!({"a": 1});
-        assert!(!remove_nested(&mut msg, "b"));
+        assert!(!remove(&mut msg, "b"));
     }
 
     // --- apply() integration ---

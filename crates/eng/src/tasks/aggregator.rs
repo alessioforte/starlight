@@ -5,6 +5,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
+use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -131,14 +132,14 @@ impl Window {
                 AggFn::Count => {}
                 AggFn::Sum | AggFn::Avg => {
                     if seen_sum.insert(&col.field) {
-                        if let Some(n) = get_nested(msg, &col.field).and_then(as_f64) {
+                        if let Some(n) = get(msg, &col.field).and_then(as_f64) {
                             *self.sums.entry(col.field.clone()).or_default() += n;
                         }
                     }
                 }
                 AggFn::Min => {
                     if seen_min.insert(&col.field) {
-                        if let Some(n) = get_nested(msg, &col.field).and_then(as_f64) {
+                        if let Some(n) = get(msg, &col.field).and_then(as_f64) {
                             let entry = self
                                 .mins
                                 .entry(col.field.clone())
@@ -151,7 +152,7 @@ impl Window {
                 }
                 AggFn::Max => {
                     if seen_max.insert(&col.field) {
-                        if let Some(n) = get_nested(msg, &col.field).and_then(as_f64) {
+                        if let Some(n) = get(msg, &col.field).and_then(as_f64) {
                             let entry = self
                                 .maxs
                                 .entry(col.field.clone())
@@ -164,7 +165,7 @@ impl Window {
                 }
                 AggFn::Collect => {
                     if seen_collect.insert(&col.field) {
-                        if let Some(v) = get_nested(msg, &col.field) {
+                        if let Some(v) = get(msg, &col.field) {
                             self.collections
                                 .entry(col.field.clone())
                                 .or_default()
@@ -228,25 +229,10 @@ impl Window {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Resolve a dot-notation path to a nested JSON value.
-fn get_nested<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').fold(Some(value), |acc, key| {
-        acc.and_then(|v| match v {
-            Value::Object(map) => map.get(key),
-            Value::Array(arr) => key.parse::<usize>().ok().and_then(|i| arr.get(i)),
-            _ => None,
-        })
-    })
-}
-
-fn as_f64(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_i64().map(|n| n as f64))
-}
-
 /// Extract the group key from a message (stringified for HashMap key).
 fn group_key(msg: &Value, group_by: &Option<String>) -> String {
     match group_by {
-        Some(path) => match get_nested(msg, path) {
+        Some(path) => match get(msg, path) {
             Some(Value::String(s)) => s.clone(),
             Some(v) => v.to_string(),
             None => "__null__".to_string(),
@@ -387,7 +373,7 @@ impl Task for Aggregator {
             };
 
             // Check if we should still be running
-            if !ctx.is_running() && ctx.is_running() == false {
+            if !ctx.is_running() {
                 // Stopped — flush remaining windows below
                 break;
             }

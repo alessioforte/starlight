@@ -7,6 +7,7 @@ use crate::ctx::TaskContext;
 use crate::err::{EngineError, Result, WorkflowError};
 use crate::metrics::CoarseClock;
 use crate::task::{Command, Task, TaskInfo, TaskRunner};
+use crate::tasks::TaskRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -82,11 +83,6 @@ impl Workflow {
             task_count: self.handles.len(),
         }
     }
-
-    // /// Get current workflow status
-    // pub async fn status(&self) -> WorkflowStatus {
-    //     self.status.read().await.clone()
-    // }
 
     /// Get information about all tasks in the workflow, including live metrics
     pub fn state(&self) -> Vec<TaskInfo> {
@@ -167,7 +163,7 @@ impl Drop for Workflow {
 /// Builder for constructing workflows
 ///
 /// Provides a fluent API for building complex workflows.
-pub struct WorkflowBuilder {
+pub struct WorkflowBuilder<'r> {
     id: String,
     name: Option<String>,
     description: Option<String>,
@@ -175,11 +171,13 @@ pub struct WorkflowBuilder {
     channel_capacity: usize,
     /// Update interval for the shared coarse clock (default: 100ms)
     clock_interval: Duration,
+    /// Reference to the task registry for resolving task types
+    registry: &'r TaskRegistry,
 }
 
-impl WorkflowBuilder {
-    /// Create a new workflow builder
-    pub fn new(id: impl Into<String>) -> Self {
+impl<'r> WorkflowBuilder<'r> {
+    /// Create a new workflow builder with a reference to the task registry.
+    pub fn new(id: impl Into<String>, registry: &'r TaskRegistry) -> Self {
         Self {
             id: id.into(),
             name: None,
@@ -187,6 +185,7 @@ impl WorkflowBuilder {
             tasks: Vec::new(),
             channel_capacity: 1000,
             clock_interval: Duration::from_millis(100),
+            registry,
         }
     }
 
@@ -229,7 +228,7 @@ impl WorkflowBuilder {
     /// Build the workflow
     ///
     /// This validates the configuration, creates all channels,
-    /// instantiates tasks, and returns a ready-to-run workflow.
+    /// instantiates tasks via the registry, and returns a ready-to-run workflow.
     pub fn build(self) -> Result<Workflow> {
         // Validate workflow
         self.validate()?;
@@ -296,9 +295,11 @@ impl WorkflowBuilder {
         let mut contexts: HashMap<String, Arc<TaskContext>> = HashMap::new();
 
         for task_config in self.tasks {
-            let factory = task_config.kind.to_factory();
-            let task_instance =
-                (factory)(task_config.id.clone(), task_config.params).map_err(|e| {
+            // Use the registry to create the task instance
+            let task_instance = self
+                .registry
+                .create(&task_config.kind, task_config.id.clone(), task_config.params)
+                .map_err(|e| {
                     EngineError::Workflow(WorkflowError::InvalidConfig(
                         self.id.clone(),
                         format!("Failed to create task '{}': {}", task_config.id, e),
@@ -354,6 +355,21 @@ impl WorkflowBuilder {
 
     /// Validate the workflow configuration
     fn validate(&self) -> Result<()> {
+        // Check that all task types exist in the registry
+        for task in &self.tasks {
+            if !self.registry.contains(&task.kind) {
+                return Err(EngineError::Workflow(WorkflowError::InvalidConfig(
+                    self.id.clone(),
+                    format!(
+                        "Task '{}' has unknown type '{}'. Available: {:?}",
+                        task.id,
+                        task.kind,
+                        self.registry.list()
+                    ),
+                )));
+            }
+        }
+
         // Check for duplicate task IDs
         let mut task_ids = std::collections::HashSet::new();
         for task in &self.tasks {
@@ -468,15 +484,20 @@ impl WorkflowBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::Tasks;
+    use crate::cfg::TaskConfig;
+
+    fn registry() -> TaskRegistry {
+        TaskRegistry::with_builtins()
+    }
 
     #[tokio::test]
     async fn test_workflow_builder() {
-        let result = WorkflowBuilder::new("test")
+        let r = registry();
+        let result = WorkflowBuilder::new("test", &r)
             .name("Test Workflow")
             .add_task(TaskConfig::new(
                 "task1",
-                Tasks::Dummy,
+                "dummy",
                 Value::Object(Default::default()),
             ))
             .build();
@@ -486,15 +507,16 @@ mod tests {
 
     #[test]
     fn test_duplicate_task_ids() {
-        let result = WorkflowBuilder::new("test")
+        let r = registry();
+        let result = WorkflowBuilder::new("test", &r)
             .add_task(TaskConfig::new(
                 "task1",
-                Tasks::Dummy,
+                "dummy",
                 Value::Object(Default::default()),
             ))
             .add_task(TaskConfig::new(
                 "task1",
-                Tasks::Dummy,
+                "dummy",
                 Value::Object(Default::default()),
             ))
             .build();
@@ -504,9 +526,10 @@ mod tests {
 
     #[test]
     fn test_invalid_dependency() {
-        let result = WorkflowBuilder::new("test")
+        let r = registry();
+        let result = WorkflowBuilder::new("test", &r)
             .add_task(
-                TaskConfig::new("task1", Tasks::Dummy, Value::Object(Default::default()))
+                TaskConfig::new("task1", "dummy", Value::Object(Default::default()))
                     .with_dependency("nonexistent_channel"),
             )
             .build();
@@ -516,17 +539,32 @@ mod tests {
 
     #[test]
     fn test_circular_dependency() {
-        let result = WorkflowBuilder::new("test")
+        let r = registry();
+        let result = WorkflowBuilder::new("test", &r)
             .add_task(
-                TaskConfig::new("task1", Tasks::Dummy, Value::Object(Default::default()))
+                TaskConfig::new("task1", "dummy", Value::Object(Default::default()))
                     .with_dependency("task2_out")
                     .with_output("out", vec!["task1_out".to_string()]),
             )
             .add_task(
-                TaskConfig::new("task2", Tasks::Dummy, Value::Object(Default::default()))
+                TaskConfig::new("task2", "dummy", Value::Object(Default::default()))
                     .with_dependency("task1_out")
                     .with_output("out", vec!["task2_out".to_string()]),
             )
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unknown_task_type() {
+        let r = registry();
+        let result = WorkflowBuilder::new("test", &r)
+            .add_task(TaskConfig::new(
+                "task1",
+                "nonexistent_type",
+                Value::Object(Default::default()),
+            ))
             .build();
 
         assert!(result.is_err());

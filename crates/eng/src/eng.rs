@@ -1,18 +1,49 @@
 use crate::cfg::Config;
 use crate::err::{EngineError, Result, WorkflowError};
-// use crate::task::TaskInfo;
+use crate::tasks::{CreateFn, TaskRegistry};
 use crate::wf::{Workflow, WorkflowBuilder, WorkflowInfo};
 use std::collections::HashMap;
 
 pub struct Engine {
     workflows: HashMap<String, Workflow>,
+    registry: TaskRegistry,
 }
 
 impl Engine {
+    /// Create a new engine with all built-in tasks registered.
     pub fn new() -> Self {
         Engine {
             workflows: HashMap::new(),
+            registry: TaskRegistry::with_builtins(),
         }
+    }
+
+    /// Create a new engine with a custom task registry.
+    pub fn with_registry(registry: TaskRegistry) -> Self {
+        Engine {
+            workflows: HashMap::new(),
+            registry,
+        }
+    }
+
+    /// Get a reference to the task registry.
+    pub fn registry(&self) -> &TaskRegistry {
+        &self.registry
+    }
+
+    /// Get a mutable reference to the task registry.
+    ///
+    /// Use this to register custom tasks before adding workflows.
+    pub fn registry_mut(&mut self) -> &mut TaskRegistry {
+        &mut self.registry
+    }
+
+    /// Register a custom task type on the engine.
+    ///
+    /// Shorthand for `engine.registry_mut().register(name, factory)`.
+    pub fn register_task(&mut self, name: impl Into<String>, factory: CreateFn) -> &mut Self {
+        self.registry.register(name, factory);
+        self
     }
 
     pub async fn list(&self) -> Vec<WorkflowInfo> {
@@ -29,7 +60,8 @@ impl Engine {
     }
 
     pub fn add(&mut self, config: Config) -> Result<&Workflow> {
-        let mut builder = WorkflowBuilder::new(config.id.clone()).name(config.name);
+        let mut builder = WorkflowBuilder::new(config.id.clone(), &self.registry)
+            .name(config.name);
 
         if let Some(desc) = config.description {
             builder = builder.description(desc);
@@ -91,26 +123,4 @@ impl Engine {
             )))
         }
     }
-
-    // pub async fn info(&self, id: &str) -> Result<WorkflowInfo> {
-    //     if let Some(workflow) = self.workflows.get(id) {
-    //         let info = workflow.info().await;
-    //         Ok(info)
-    //     } else {
-    //         Err(EngineError::Workflow(WorkflowError::NotFound(
-    //             id.to_string(),
-    //         )))
-    //     }
-    // }
-
-    // pub fn state(&self, id: &str) -> Result<Vec<TaskInfo>> {
-    //     if let Some(workflow) = self.workflows.get(id) {
-    //         let state = workflow.state();
-    //         Ok(state)
-    //     } else {
-    //         Err(EngineError::Workflow(WorkflowError::NotFound(
-    //             id.to_string(),
-    //         )))
-    //     }
-    // }
 }

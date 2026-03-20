@@ -4,6 +4,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
+use jb::get;
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -83,20 +84,6 @@ impl JsonMapper {
             base: BaseTask::new(id, params)?,
         }))
     }
-
-    /// Get a nested value from a JSON object using dot notation
-    fn get_nested_value<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-        path.split('.').fold(Some(value), |acc, key| {
-            acc.and_then(|v| match v {
-                Value::Object(map) => map.get(key),
-                Value::Array(arr) => {
-                    // Support array indexing like "items.0.name"
-                    key.parse::<usize>().ok().and_then(|idx| arr.get(idx))
-                }
-                _ => None,
-            })
-        })
-    }
 }
 
 #[async_trait]
@@ -155,7 +142,7 @@ impl Task for JsonMapper {
                     // Apply mappings
                     if let Value::Object(ref mut result_map) = result {
                         for (output_field, input_path) in &params.mappings {
-                            if let Some(val) = Self::get_nested_value(&value, input_path) {
+                            if let Some(val) = get(&value, input_path) {
                                 result_map.insert(output_field.clone(), val.clone());
                             } else {
                                 tracing::trace!(
@@ -217,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_nested_value() {
+    fn test_get() {
         let data = json!({
             "user": {
                 "name": "John",
@@ -230,15 +217,15 @@ mod tests {
         });
 
         // Test simple nested path
-        let val = JsonMapper::get_nested_value(&data, "user.name");
+        let val = get(&data, "user.name");
         assert_eq!(val, Some(&json!("John")));
 
         // Test array indexing
-        let val = JsonMapper::get_nested_value(&data, "items.0.id");
+        let val = get(&data, "items.0.id");
         assert_eq!(val, Some(&json!(1)));
 
         // Test non-existent path
-        let val = JsonMapper::get_nested_value(&data, "user.email");
+        let val = get(&data, "user.email");
         assert_eq!(val, None);
     }
 }

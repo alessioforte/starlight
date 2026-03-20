@@ -5,6 +5,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
+use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -72,21 +73,6 @@ pub struct State {}
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Resolve a dot-notation path to a nested JSON value.
-fn get_nested<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').fold(Some(value), |acc, key| {
-        acc.and_then(|v| match v {
-            Value::Object(map) => map.get(key),
-            Value::Array(arr) => key.parse::<usize>().ok().and_then(|i| arr.get(i)),
-            _ => None,
-        })
-    })
-}
-
-fn as_f64(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_i64().map(|n| n as f64))
-}
 
 /// Stringify a JSON value for use as a lookup key / output label.
 fn value_to_key(v: &Value) -> String {
@@ -166,7 +152,7 @@ impl Splitter {
 
     /// Determine the output label for a message.
     fn route(&self, msg: &Value) -> Option<String> {
-        let field_val = get_nested(msg, &self.base.params.field)?;
+        let field_val = get(msg, &self.base.params.field)?;
 
         match &self.base.params.mode {
             SplitMode::Value => Some(value_to_key(field_val)),

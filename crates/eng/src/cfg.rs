@@ -1,4 +1,3 @@
-use crate::tasks::Tasks;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,28 +18,30 @@ pub struct TaskConfig {
     /// Unique task identifier
     pub id: String,
 
-    /// Task type
+    /// Task type name (e.g. `"filter"`, `"aggregator"`, `"my_custom_task"`).
+    ///
+    /// Resolved at build time via the [`TaskRegistry`].
     #[serde(rename = "type")]
-    pub kind: Tasks,
+    pub kind: String,
 
     /// Task parameters as JSON
     pub params: Value,
 
-    /// List of upstream task IDs this task depends on
+    /// List of upstream channel IDs this task depends on
     pub dependencies: Vec<String>,
 
-    /// Map of output labels to downstream task IDs
+    /// Map of output labels to downstream channel IDs.
     /// Key: output label (e.g., "out", "error")
-    /// Value: list of downstream task IDs that receive from this output
+    /// Value: list of channel IDs that this output writes to
     pub outputs: HashMap<String, Vec<String>>,
 }
 
 impl TaskConfig {
     /// Create a new task configuration
-    pub fn new(id: impl Into<String>, kind: Tasks, params: Value) -> Self {
+    pub fn new(id: impl Into<String>, kind: impl Into<String>, params: Value) -> Self {
         Self {
             id: id.into(),
-            kind,
+            kind: kind.into(),
             params,
             dependencies: Vec::new(),
             outputs: HashMap::new(),

@@ -5,6 +5,7 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
+use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -119,20 +120,9 @@ impl Filter {
         }))
     }
 
-    /// Resolve a dot-notation path to a nested JSON value.
-    fn get_nested<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-        path.split('.').fold(Some(value), |acc, key| {
-            acc.and_then(|v| match v {
-                Value::Object(map) => map.get(key),
-                Value::Array(arr) => key.parse::<usize>().ok().and_then(|i| arr.get(i)),
-                _ => None,
-            })
-        })
-    }
-
     /// Evaluate a single condition against a message.
     fn eval_condition(msg: &Value, cond: &Condition) -> bool {
-        let field_val = Self::get_nested(msg, &cond.field);
+        let field_val = get(msg, &cond.field);
 
         match cond.operator {
             Operator::Exists => field_val.is_some(),
@@ -151,13 +141,9 @@ impl Filter {
 
     /// Numeric comparison helper.  Converts both sides to f64.
     fn cmp_numbers(field: Option<&Value>, target: &Value, cmp: fn(f64, f64) -> bool) -> bool {
-        let a = field.and_then(Self::as_f64);
-        let b = Self::as_f64(target);
+        let a = field.and_then(as_f64);
+        let b = as_f64(target);
         matches!((a, b), (Some(a), Some(b)) if cmp(a, b))
-    }
-
-    fn as_f64(v: &Value) -> Option<f64> {
-        v.as_f64().or_else(|| v.as_i64().map(|n| n as f64))
     }
 
     /// `Contains` semantics:
