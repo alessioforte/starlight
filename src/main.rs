@@ -1,6 +1,6 @@
 mod act;
+mod api;
 mod etc;
-mod rts;
 
 use crate::etc::cfg::AppState;
 use axum::Router;
@@ -25,7 +25,7 @@ async fn main() {
 
     act::load_workflow_from_dir(&engine).await;
 
-    let app = Router::new().merge(rts::routes()).with_state(AppState {
+    let app = Router::new().merge(api::routes()).with_state(AppState {
         engine: engine.clone(),
     });
 
