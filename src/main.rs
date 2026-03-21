@@ -1,6 +1,7 @@
 mod act;
 mod api;
 mod etc;
+mod tasks;
 
 use crate::etc::cfg::AppState;
 use axum::Router;
@@ -21,7 +22,9 @@ async fn main() {
 
     dotenv().ok();
     console_subscriber::init();
-    let engine = Arc::new(Mutex::new(Engine::new()));
+    let mut engine = Engine::new();
+    engine.register_task("simulator", tasks::simulator::SimulatorTask::create);
+    let engine = Arc::new(Mutex::new(engine));
 
     act::load_workflow_from_dir(&engine).await;
 

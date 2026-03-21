@@ -12,7 +12,7 @@ pub use ctx::{Input, Output, TaskContext};
 pub use eng::Engine;
 pub use err::{EngineError, Result, TaskError, WorkflowError};
 pub use metrics::{CoarseClock, MetricsSnapshot, TaskMetrics};
-pub use task::{BaseTask, Command, Task, TaskInfo};
+pub use task::{BaseTask, Command, Task, TaskInfo, TaskStatus};
 pub use tasks::{CreateFn, TaskRegistry};
 pub use wf::{Workflow, WorkflowBuilder, WorkflowInfo};
 
@@ -22,7 +22,7 @@ pub mod prelude {
     pub use crate::eng::Engine;
     pub use crate::err::{EngineError, Result, TaskError, WorkflowError};
     pub use crate::metrics::{CoarseClock, MetricsSnapshot, TaskMetrics};
-    pub use crate::task::{BaseTask, Command, Task, TaskInfo};
+    pub use crate::task::{BaseTask, Command, Task, TaskInfo, TaskStatus};
     pub use crate::tasks::{CreateFn, TaskRegistry};
     pub use crate::wf::{Workflow, WorkflowBuilder, WorkflowInfo};
     pub use async_trait::async_trait;

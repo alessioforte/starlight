@@ -1,0 +1,39 @@
+id: sim
+name: Simulator
+description: Simulate number and write to csv file
+tasks:
+  - id: sim_1
+    type: simulator
+    dependencies: []
+    params:
+      models:
+        - type: sine
+          amplitude: 10
+          frequency: 0.1
+        - type: random
+          mean: 0
+          stddev: 0.5
+          seed: 42
+      interval_ms: 500
+      count: 100
+      field: temperature
+    outputs:
+      out:
+        - sim_1_out
+  - id: log_1
+    type: logger
+    dependencies:
+      - sim_1_out
+    params:
+      prefix: "SIM_1: "
+    outputs: {}
+
+  - id: to_csv
+    type: csv_writer
+    dependencies:
+      - sim_1_out
+    params:
+      filename: /Users/alessioforte/Code/projects/starlight/.starlight/data/simulation.csv
+      write_mode: append
+      flush_every: 100
+    outputs: {}
