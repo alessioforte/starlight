@@ -1,6 +1,6 @@
 use super::Model;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 pub struct RandomWalkModel {
     pub current: f64,

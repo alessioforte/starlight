@@ -1,8 +1,8 @@
 use simulator::{
     Simulator,
     models::{
-        AnomalyModel, ClampModel, MaxModel, ProductModel, RandomModel,
-        RandomWalkModel, ScaleModel, SineModel, SumModel, TrendModel,
+        AnomalyModel, ClampModel, MaxModel, ProductModel, RandomModel, RandomWalkModel, ScaleModel,
+        SineModel, SumModel, TrendModel,
     },
 };
 
@@ -15,7 +15,11 @@ fn main() {
         250, // 250 ms step → 4 samples per second
     );
     for _ in 0..8 {
-        println!("  t={:>6} ms  value={:>8.3}", sim.current_time_ms(), sim.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            sim.current_time_ms(),
+            sim.tick()
+        );
     }
 
     // ── 2. Gaussian noise ────────────────────────────────────────────────────
@@ -26,7 +30,11 @@ fn main() {
         1000,
     );
     for _ in 0..6 {
-        println!("  t={:>6} ms  value={:>8.3}", noisy.current_time_ms(), noisy.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            noisy.current_time_ms(),
+            noisy.tick()
+        );
     }
 
     // ── 3. Random walk ───────────────────────────────────────────────────────
@@ -37,7 +45,11 @@ fn main() {
         1000,
     );
     for _ in 0..8 {
-        println!("  t={:>6} ms  value={:>8.3}", walk.current_time_ms(), walk.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            walk.current_time_ms(),
+            walk.tick()
+        );
     }
 
     // ── 4. Composed signal ───────────────────────────────────────────────────
@@ -53,31 +65,42 @@ fn main() {
         1000,
     );
     for _ in 0..10 {
-        println!("  t={:>6} ms  value={:>8.3}", composed.current_time_ms(), composed.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            composed.current_time_ms(),
+            composed.tick()
+        );
     }
 
     // ── 5. Anomaly injection ─────────────────────────────────────────────────
     // Wrap the composed signal with occasional spikes
     println!("\n=== Anomaly injection (p=0.3, magnitude 20–40, bidirectional) ===");
-    let base: Box<dyn simulator::models::Model> = Box::new(SineModel::new(50.0, 1.0 / 10_000.0, 0.0));
+    let base: Box<dyn simulator::models::Model> =
+        Box::new(SineModel::new(50.0, 1.0 / 10_000.0, 0.0));
     let mut anomalous = Simulator::with_step(
-        vec![Box::new(AnomalyModel::with_seed(base, 0.3, 20.0, 40.0, true, 55))],
+        vec![Box::new(AnomalyModel::with_seed(
+            base, 0.3, 20.0, 40.0, true, 55,
+        ))],
         0,
         1000,
     );
     for _ in 0..12 {
-        println!("  t={:>6} ms  value={:>8.3}", anomalous.current_time_ms(), anomalous.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            anomalous.current_time_ms(),
+            anomalous.tick()
+        );
     }
 
     // ── 6. Linear trend ──────────────────────────────────────────────────────
     println!("\n=== Linear trend (slope=2/s, intercept=10) ===");
-    let mut linear = Simulator::with_step(
-        vec![Box::new(TrendModel::linear(2.0, 10.0))],
-        0,
-        1000,
-    );
+    let mut linear = Simulator::with_step(vec![Box::new(TrendModel::linear(2.0, 10.0))], 0, 1000);
     for _ in 0..6 {
-        println!("  t={:>6} ms  value={:>8.3}", linear.current_time_ms(), linear.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            linear.current_time_ms(),
+            linear.tick()
+        );
     }
 
     // ── 7. Exponential decay + noise  ────────────────────────────────────────
@@ -93,7 +116,11 @@ fn main() {
         1000,
     );
     for _ in 0..8 {
-        println!("  t={:>6} ms  value={:>8.3}", decay.current_time_ms(), decay.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            decay.current_time_ms(),
+            decay.tick()
+        );
     }
 
     // ── 8. Realistic metric: linear growth + seasonality + noise ─────────────
@@ -101,7 +128,7 @@ fn main() {
     println!("\n=== Realistic metric: growth + seasonality + noise ===");
     let mut realistic = Simulator::with_step(
         vec![
-            Box::new(TrendModel::linear(0.005, 100.0)),          // slow growth
+            Box::new(TrendModel::linear(0.005, 100.0)), // slow growth
             Box::new(SineModel::new(20.0, 1.0 / 86_400.0, 0.0)), // 24 h seasonality
             Box::new(RandomModel::with_seed(0.0, 2.0, 31)),
         ],
@@ -118,21 +145,22 @@ fn main() {
     // Useful for modelling post-restart memory oscillations, spring-damping, etc.
     println!("\n=== ProductModel: decaying sine (envelope × oscillation) ===");
     let envelope = Box::new(TrendModel::exponential(50.0, -0.3)); // 50 * e^(-0.3t)
-    let wave = Box::new(SineModel::new(1.0, 0.5, 0.0));           // unit sine at 0.5 Hz
-    let mut damped = Simulator::with_step(
-        vec![Box::new(ProductModel::new(envelope, wave))],
-        0,
-        500,
-    );
+    let wave = Box::new(SineModel::new(1.0, 0.5, 0.0)); // unit sine at 0.5 Hz
+    let mut damped =
+        Simulator::with_step(vec![Box::new(ProductModel::new(envelope, wave))], 0, 500);
     for _ in 0..8 {
-        println!("  t={:>6} ms  value={:>8.3}", damped.current_time_ms(), damped.tick());
+        println!(
+            "  t={:>6} ms  value={:>8.3}",
+            damped.current_time_ms(),
+            damped.tick()
+        );
     }
 
     // ── 10. ClampModel: bounded CPU usage ────────────────────────────────────
     // A random walk that would drift below 0% or above 100% is clamped to [0, 100].
     println!("\n=== ClampModel: CPU usage bounded to [0, 100] ===");
     let unbounded = SumModel::new(vec![
-        Box::new(TrendModel::linear(0.0, 70.0)),               // baseline at 70%
+        Box::new(TrendModel::linear(0.0, 70.0)), // baseline at 70%
         Box::new(RandomWalkModel::with_seed(0.0, 0.5, 8.0, 5)), // volatile walk
     ]);
     let mut cpu = Simulator::with_step(
@@ -141,20 +169,18 @@ fn main() {
         1000,
     );
     for _ in 0..10 {
-        println!("  t={:>6} ms  cpu={:>6.1}%", cpu.current_time_ms(), cpu.tick());
+        println!(
+            "  t={:>6} ms  cpu={:>6.1}%",
+            cpu.current_time_ms(),
+            cpu.tick()
+        );
     }
 
     // ── 11. ScaleModel + MaxModel: two services, take the busier one ──────────
     // Two independent load signals; MaxModel picks whichever is higher at each tick.
     println!("\n=== MaxModel: peak load across two services ===");
-    let service_a = ScaleModel::new(
-        Box::new(SineModel::new(1.0, 1.0 / 20_000.0, 0.0)),
-        40.0,
-    ); // 0..40
-    let service_b = ScaleModel::new(
-        Box::new(SineModel::new(1.0, 1.0 / 12_000.0, 1.5)),
-        60.0,
-    ); // 0..60, different phase
+    let service_a = ScaleModel::new(Box::new(SineModel::new(1.0, 1.0 / 20_000.0, 0.0)), 40.0); // 0..40
+    let service_b = ScaleModel::new(Box::new(SineModel::new(1.0, 1.0 / 12_000.0, 1.5)), 60.0); // 0..60, different phase
     let mut peak = Simulator::with_step(
         vec![Box::new(MaxModel::new(vec![
             Box::new(service_a),
@@ -164,7 +190,11 @@ fn main() {
         2000,
     );
     for _ in 0..8 {
-        println!("  t={:>6} ms  peak={:>7.2}", peak.current_time_ms(), peak.tick());
+        println!(
+            "  t={:>6} ms  peak={:>7.2}",
+            peak.current_time_ms(),
+            peak.tick()
+        );
     }
 
     // ── 12. Full nested pipeline ──────────────────────────────────────────────
@@ -186,7 +216,14 @@ fn main() {
     let jitter = Box::new(RandomModel::with_seed(0.0, 1.0, 19));
     let modulated_noise = Box::new(ProductModel::new(spike_envelope, jitter));
     let diurnal_base = Box::new(SineModel::new(20.0, 1.0 / 86_400.0, -1.57));
-    let diurnal = Box::new(AnomalyModel::with_seed(diurnal_base, 0.02, 200.0, 800.0, false, 88));
+    let diurnal = Box::new(AnomalyModel::with_seed(
+        diurnal_base,
+        0.02,
+        200.0,
+        800.0,
+        false,
+        88,
+    ));
     let raw = SumModel::new(vec![growth, modulated_noise, diurnal]);
     let p99 = ClampModel::new(Box::new(raw), 1.0, 5000.0);
     let mut latency_sim = Simulator::with_step(vec![Box::new(p99)], 0, 3_600_000);

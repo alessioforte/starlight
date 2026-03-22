@@ -8,11 +8,11 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
-use jb::{as_f64, get, set};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
 use evalexpr::*;
 use indexmap::IndexMap;
+use jb::{as_f64, get, set};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -82,7 +82,9 @@ struct CompiledExpr {
 }
 
 /// Parse all expressions once at task creation.
-fn compile_expressions(exprs: &IndexMap<String, String>) -> std::result::Result<Vec<CompiledExpr>, String> {
+fn compile_expressions(
+    exprs: &IndexMap<String, String>,
+) -> std::result::Result<Vec<CompiledExpr>, String> {
     exprs
         .iter()
         .map(|(name, src)| {
@@ -129,25 +131,30 @@ impl MathExpEval {
     pub fn create(id: String, params: Value) -> Result<Box<dyn Task>> {
         let base: BaseTask<Params, State> = BaseTask::new(id, params)?;
 
-        let compiled = compile_expressions(&base.params.expressions).map_err(|e| {
-            crate::err::EngineError::invalid_params(&base.id, e)
-        })?;
+        let compiled = compile_expressions(&base.params.expressions)
+            .map_err(|e| crate::err::EngineError::invalid_params(&base.id, e))?;
 
         Ok(Box::new(Self { base, compiled }))
     }
 
     /// Build the evalexpr context for a single message.
     /// Returns `None` if a required var cannot be extracted as f64.
-    fn build_context(
-        &self,
-        msg: &Value,
-    ) -> std::result::Result<HashMapContext::<NT>, String> {
+    fn build_context(&self, msg: &Value) -> std::result::Result<HashMapContext<NT>, String> {
         let mut ctx = HashMapContext::<NT>::new();
 
         // Built-in math constants
-        let _ = ctx.set_value("PI".into(), evalexpr::Value::<NT>::Float(std::f64::consts::PI));
-        let _ = ctx.set_value("E".into(), evalexpr::Value::<NT>::Float(std::f64::consts::E));
-        let _ = ctx.set_value("TAU".into(), evalexpr::Value::<NT>::Float(std::f64::consts::TAU));
+        let _ = ctx.set_value(
+            "PI".into(),
+            evalexpr::Value::<NT>::Float(std::f64::consts::PI),
+        );
+        let _ = ctx.set_value(
+            "E".into(),
+            evalexpr::Value::<NT>::Float(std::f64::consts::E),
+        );
+        let _ = ctx.set_value(
+            "TAU".into(),
+            evalexpr::Value::<NT>::Float(std::f64::consts::TAU),
+        );
 
         // User-defined constants (already f64)
         for (name, val) in &self.base.params.consts {
@@ -182,7 +189,7 @@ impl MathExpEval {
     /// Each result is also injected into the context for chaining.
     fn evaluate(
         &self,
-        ctx: &mut HashMapContext::<NT>,
+        ctx: &mut HashMapContext<NT>,
     ) -> std::result::Result<Vec<(String, f64)>, String> {
         let mut results = Vec::with_capacity(self.compiled.len());
 
@@ -294,11 +301,7 @@ impl Task for MathExpEval {
                         }
                         Err(e) => {
                             errors += 1;
-                            tracing::debug!(
-                                "MathExpEval [{}]: context error: {}",
-                                self.base.id,
-                                e
-                            );
+                            tracing::debug!("MathExpEval [{}]: context error: {}", self.base.id, e);
                             if let Some(ref err_out) = error_out {
                                 msg["_error"] = json!(e);
                                 err_out.send(msg).await?;
@@ -316,10 +319,7 @@ impl Task for MathExpEval {
                     }
                 }
                 Err(_) => {
-                    tracing::debug!(
-                        "MathExpEval [{}]: Input channel closed",
-                        self.base.id,
-                    );
+                    tracing::debug!("MathExpEval [{}]: Input channel closed", self.base.id,);
                     break;
                 }
             }
@@ -482,7 +482,7 @@ mod tests {
         let msg = json!({});
         let ctx = eval.build_context(&msg).unwrap();
         // PI should be available
-        let result = eval_with_context::<HashMapContext::<NT>>("PI", &ctx).unwrap();
+        let result = eval_with_context::<HashMapContext<NT>>("PI", &ctx).unwrap();
         let f = eval_as_f64(&result).unwrap();
         assert!((f - std::f64::consts::PI).abs() < 1e-10);
     }

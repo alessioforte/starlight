@@ -145,9 +145,10 @@ impl Timer {
 
     /// Check if we've reached the tick limit.
     fn limit_reached(&self) -> bool {
-        self.base.params.count.is_some_and(|max| {
-            self.base.state.ticks.load(Ordering::Relaxed) >= max
-        })
+        self.base
+            .params
+            .count
+            .is_some_and(|max| self.base.state.ticks.load(Ordering::Relaxed) >= max)
     }
 }
 
@@ -234,9 +235,7 @@ impl Task for Timer {
                         }
                     };
 
-                    let wait = (next - now)
-                        .to_std()
-                        .unwrap_or(std::time::Duration::ZERO);
+                    let wait = (next - now).to_std().unwrap_or(std::time::Duration::ZERO);
 
                     if !wait.is_zero() {
                         tokio::time::sleep(wait).await;
@@ -254,11 +253,7 @@ impl Task for Timer {
         }
 
         let total = self.base.state.ticks.load(Ordering::Relaxed);
-        tracing::info!(
-            "Timer [{}]: Finished after {} ticks",
-            self.base.id,
-            total,
-        );
+        tracing::info!("Timer [{}]: Finished after {} ticks", self.base.id, total,);
 
         Ok(())
     }
@@ -479,8 +474,7 @@ mod tests {
 
     #[test]
     fn test_timer_mode_cron_serde() {
-        let mode: TimerMode =
-            serde_json::from_value(json!({"cron": "*/10 * * * * * *"})).unwrap();
+        let mode: TimerMode = serde_json::from_value(json!({"cron": "*/10 * * * * * *"})).unwrap();
         assert!(matches!(mode, TimerMode::Cron(_)));
     }
 }

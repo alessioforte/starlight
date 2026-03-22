@@ -7,7 +7,10 @@ use crate::ctx::TaskContext;
 use crate::err::Result;
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
-use reqwest::{Client, Method, header::{HeaderMap, HeaderName, HeaderValue}};
+use reqwest::{
+    Client, Method,
+    header::{HeaderMap, HeaderName, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -172,10 +175,7 @@ impl HttpSender {
     fn build_client(params: &Params) -> std::result::Result<Client, reqwest::Error> {
         let mut default_headers = HeaderMap::new();
         for (k, v) in &params.headers {
-            if let (Ok(name), Ok(val)) = (
-                k.parse::<HeaderName>(),
-                HeaderValue::from_str(v),
-            ) {
+            if let (Ok(name), Ok(val)) = (k.parse::<HeaderName>(), HeaderValue::from_str(v)) {
                 default_headers.insert(name, val);
             }
         }
@@ -339,11 +339,7 @@ impl Task for HttpSender {
                                 output.send(resp).await?;
                             }
                             Err(err_msg) => {
-                                tracing::warn!(
-                                    "HttpSender [{}]: {}",
-                                    self.base.id,
-                                    err_msg,
-                                );
+                                tracing::warn!("HttpSender [{}]: {}", self.base.id, err_msg,);
                                 if let Some(ref err_out) = error_output {
                                     err_out
                                         .send(json!({
@@ -356,10 +352,7 @@ impl Task for HttpSender {
                         }
                     }
                     Err(_) => {
-                        tracing::debug!(
-                            "HttpSender [{}]: Input channel closed",
-                            self.base.id
-                        );
+                        tracing::debug!("HttpSender [{}]: Input channel closed", self.base.id);
                         break;
                     }
                 }
@@ -391,20 +384,14 @@ impl Task for HttpSender {
 
                         tokio::spawn(async move {
                             let body = Self::extract_body(&msg, &body_mode);
-                            match Self::send_request(
-                                &client, &method, &url, body.as_ref(), &retry,
-                            )
-                            .await
+                            match Self::send_request(&client, &method, &url, body.as_ref(), &retry)
+                                .await
                             {
                                 Ok(resp) => {
                                     let _ = output.send(resp).await;
                                 }
                                 Err(err_msg) => {
-                                    tracing::warn!(
-                                        "HttpSender [{}]: {}",
-                                        task_id,
-                                        err_msg,
-                                    );
+                                    tracing::warn!("HttpSender [{}]: {}", task_id, err_msg,);
                                     if let Some(ref err_out) = *error_output {
                                         let _ = err_out
                                             .send(json!({
@@ -419,10 +406,7 @@ impl Task for HttpSender {
                         });
                     }
                     Err(_) => {
-                        tracing::debug!(
-                            "HttpSender [{}]: Input channel closed",
-                            task_id
-                        );
+                        tracing::debug!("HttpSender [{}]: Input channel closed", task_id);
                         break;
                     }
                 }

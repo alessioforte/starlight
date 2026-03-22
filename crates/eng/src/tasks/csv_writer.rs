@@ -113,11 +113,7 @@ fn value_to_cell(v: &Value) -> String {
 fn build_line(columns: &[String], msg: &Value, delimiter: char) -> String {
     columns
         .iter()
-        .map(|col| {
-            msg.get(col)
-                .map(value_to_cell)
-                .unwrap_or_default()
-        })
+        .map(|col| msg.get(col).map(value_to_cell).unwrap_or_default())
         .collect::<Vec<_>>()
         .join(&delimiter.to_string())
 }
@@ -197,26 +193,26 @@ impl Task for CsvWriter {
         // Open file
         let mut file = match params.write_mode {
             WriteMode::Overwrite => {
-                tokio::fs::File::create(&params.filename).await.map_err(|e| {
-                    crate::err::EngineError::task_execution(
-                        &self.base.id,
-                        format!("Failed to create '{}': {}", params.filename, e),
-                    )
-                })?
-            }
-            WriteMode::Append => {
-                tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&params.filename)
+                tokio::fs::File::create(&params.filename)
                     .await
                     .map_err(|e| {
                         crate::err::EngineError::task_execution(
                             &self.base.id,
-                            format!("Failed to open '{}': {}", params.filename, e),
+                            format!("Failed to create '{}': {}", params.filename, e),
                         )
                     })?
             }
+            WriteMode::Append => tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&params.filename)
+                .await
+                .map_err(|e| {
+                    crate::err::EngineError::task_execution(
+                        &self.base.id,
+                        format!("Failed to open '{}': {}", params.filename, e),
+                    )
+                })?,
         };
 
         // Check if we need to write a header (append mode: only if file is empty)
@@ -301,11 +297,7 @@ impl Task for CsvWriter {
 
                     let total = state.rows_written.load(Ordering::Relaxed);
                     if total > 0 && total % 10_000 == 0 {
-                        tracing::debug!(
-                            "CsvWriter [{}]: {} rows written",
-                            self.base.id,
-                            total,
-                        );
+                        tracing::debug!("CsvWriter [{}]: {} rows written", self.base.id, total,);
                     }
                 }
                 Err(_) => {
@@ -484,7 +476,7 @@ mod tests {
         // Set up context with one input channel
         let (tx, rx) = mpsc::channel(10);
         let mut inputs = HashMap::new();
-        inputs.insert("data".to_string(), rx);
+        inputs.insert("in".to_string(), vec![("data".to_string(), rx)]);
 
         let ctx = Arc::new(TaskContext::new("csv_test".into(), inputs, HashMap::new()));
         ctx.resume();

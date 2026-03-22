@@ -110,7 +110,6 @@ impl EngineError {
     }
 }
 
-
 /// Convert from task join errors
 impl From<tokio::task::JoinError> for EngineError {
     fn from(err: tokio::task::JoinError) -> Self {

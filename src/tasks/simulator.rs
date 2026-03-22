@@ -6,8 +6,8 @@
 use eng::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use simulator::models::*;
 use simulator::Simulator;
+use simulator::models::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
@@ -78,19 +78,33 @@ pub enum TrendConfig {
     },
 }
 
-fn default_stddev() -> f64 { 1.0 }
-fn default_volatility() -> f64 { 1.0 }
-fn default_probability() -> f64 { 0.05 }
-fn default_min_magnitude() -> f64 { 5.0 }
-fn default_max_magnitude() -> f64 { 10.0 }
-fn default_one() -> f64 { 1.0 }
+fn default_stddev() -> f64 {
+    1.0
+}
+fn default_volatility() -> f64 {
+    1.0
+}
+fn default_probability() -> f64 {
+    0.05
+}
+fn default_min_magnitude() -> f64 {
+    5.0
+}
+fn default_max_magnitude() -> f64 {
+    10.0
+}
+fn default_one() -> f64 {
+    1.0
+}
 
 impl ModelConfig {
     fn build(self) -> Box<dyn simulator::models::Model> {
         match self {
-            ModelConfig::Sine { amplitude, frequency, phase } => {
-                Box::new(SineModel::new(amplitude, frequency, phase))
-            }
+            ModelConfig::Sine {
+                amplitude,
+                frequency,
+                phase,
+            } => Box::new(SineModel::new(amplitude, frequency, phase)),
             ModelConfig::Random { mean, stddev, seed } => {
                 if let Some(s) = seed {
                     Box::new(RandomModel::with_seed(mean, stddev, s))
@@ -98,7 +112,12 @@ impl ModelConfig {
                     Box::new(RandomModel::new(mean, stddev))
                 }
             }
-            ModelConfig::RandomWalk { start, drift, volatility, seed } => {
+            ModelConfig::RandomWalk {
+                start,
+                drift,
+                volatility,
+                seed,
+            } => {
                 if let Some(s) = seed {
                     Box::new(RandomWalkModel::with_seed(start, drift, volatility, s))
                 } else {
@@ -113,12 +132,32 @@ impl ModelConfig {
                     Box::new(TrendModel::exponential(initial, rate))
                 }
             },
-            ModelConfig::Anomaly { base, probability, min_magnitude, max_magnitude, bidirectional, seed } => {
+            ModelConfig::Anomaly {
+                base,
+                probability,
+                min_magnitude,
+                max_magnitude,
+                bidirectional,
+                seed,
+            } => {
                 let base_model = base.build();
                 if let Some(s) = seed {
-                    Box::new(AnomalyModel::with_seed(base_model, probability, min_magnitude, max_magnitude, bidirectional, s))
+                    Box::new(AnomalyModel::with_seed(
+                        base_model,
+                        probability,
+                        min_magnitude,
+                        max_magnitude,
+                        bidirectional,
+                        s,
+                    ))
                 } else {
-                    Box::new(AnomalyModel::new(base_model, probability, min_magnitude, max_magnitude, bidirectional))
+                    Box::new(AnomalyModel::new(
+                        base_model,
+                        probability,
+                        min_magnitude,
+                        max_magnitude,
+                        bidirectional,
+                    ))
                 }
             }
         }
@@ -148,8 +187,12 @@ pub struct Params {
     pub field: String,
 }
 
-fn default_interval() -> u64 { 1000 }
-fn default_field() -> String { "value".to_string() }
+fn default_interval() -> u64 {
+    1000
+}
+fn default_field() -> String {
+    "value".to_string()
+}
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -189,9 +232,9 @@ impl SimulatorTask {
     }
 
     fn limit_reached(&self) -> bool {
-        self.params.count.is_some_and(|max| {
-            self.state.ticks.load(Ordering::Relaxed) >= max
-        })
+        self.params
+            .count
+            .is_some_and(|max| self.state.ticks.load(Ordering::Relaxed) >= max)
     }
 }
 
@@ -206,7 +249,9 @@ impl Task for SimulatorTask {
     }
 
     fn get_info(&self) -> TaskInfo {
-        let current_status = self.status.as_ref()
+        let current_status = self
+            .status
+            .as_ref()
             .and_then(|s| s.try_read().ok().map(|s| format!("{:?}", *s)));
 
         TaskInfo {

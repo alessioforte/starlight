@@ -245,11 +245,26 @@ impl<'r> WorkflowBuilder<'r> {
         // ---------------------------------------------------------
         let mut channel_consumers: HashMap<String, Vec<String>> = HashMap::new();
         for task in &self.tasks {
-            for dep_channel_id in &task.dependencies {
-                channel_consumers
-                    .entry(dep_channel_id.clone())
-                    .or_default()
-                    .push(task.id.clone());
+            for (_port, channel_ids) in &task.dependencies {
+                for dep_channel_id in channel_ids {
+                    channel_consumers
+                        .entry(dep_channel_id.clone())
+                        .or_default()
+                        .push(task.id.clone());
+                }
+            }
+        }
+
+        // ---------------------------------------------------------
+        // 1b. Build reverse map: (consumer_task_id, channel_id) → port_name
+        // ---------------------------------------------------------
+        let mut channel_to_port: HashMap<(String, String), String> = HashMap::new();
+        for task in &self.tasks {
+            for (port_name, channel_ids) in &task.dependencies {
+                for channel_id in channel_ids {
+                    channel_to_port
+                        .insert((task.id.clone(), channel_id.clone()), port_name.clone());
+                }
             }
         }
 
@@ -260,9 +275,11 @@ impl<'r> WorkflowBuilder<'r> {
         // producer task id → output label → Vec<mpsc::Sender>
         let mut producer_senders: HashMap<String, HashMap<String, Vec<mpsc::Sender<Value>>>> =
             HashMap::new();
-        // consumer task id → channel_id → mpsc::Receiver
-        let mut consumer_receivers: HashMap<String, HashMap<String, mpsc::Receiver<Value>>> =
-            HashMap::new();
+        // consumer task id → port_name → Vec<(channel_id, mpsc::Receiver)>
+        let mut consumer_receivers: HashMap<
+            String,
+            HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
+        > = HashMap::new();
 
         for task in &self.tasks {
             for (label, channel_ids) in &task.outputs {
@@ -279,10 +296,18 @@ impl<'r> WorkflowBuilder<'r> {
                             .entry(label.clone())
                             .or_default()
                             .push(tx);
+
+                        let port_name = channel_to_port
+                            .get(&(consumer_task_id.clone(), channel_id.clone()))
+                            .cloned()
+                            .unwrap_or_else(|| "in".to_string());
+
                         consumer_receivers
                             .entry(consumer_task_id)
                             .or_default()
-                            .insert(channel_id.clone(), rx);
+                            .entry(port_name)
+                            .or_default()
+                            .push((channel_id.clone(), rx));
                     }
                 }
             }
@@ -298,7 +323,11 @@ impl<'r> WorkflowBuilder<'r> {
             // Use the registry to create the task instance
             let task_instance = self
                 .registry
-                .create(&task_config.kind, task_config.id.clone(), task_config.params)
+                .create(
+                    &task_config.kind,
+                    task_config.id.clone(),
+                    task_config.params,
+                )
                 .map_err(|e| {
                     EngineError::Workflow(WorkflowError::InvalidConfig(
                         self.id.clone(),
@@ -306,15 +335,13 @@ impl<'r> WorkflowBuilder<'r> {
                     ))
                 })?;
 
-            // Inputs: receivers for this task
+            // Inputs: port-keyed receivers for this task
             let inputs = consumer_receivers
                 .remove(&task_config.id)
                 .unwrap_or_default();
 
             // Outputs: senders from this task
-            let outputs = producer_senders
-                .remove(&task_config.id)
-                .unwrap_or_default();
+            let outputs = producer_senders.remove(&task_config.id).unwrap_or_default();
 
             // Create task context with the configured channel capacity and shared clock
             let context = TaskContext::with_capacity(
@@ -393,15 +420,17 @@ impl<'r> WorkflowBuilder<'r> {
 
         // Check that all dependencies reference existing output channels
         for task in &self.tasks {
-            for dep_channel_id in &task.dependencies {
-                if !available_channels.contains(dep_channel_id.as_str()) {
-                    return Err(EngineError::Workflow(WorkflowError::InvalidConfig(
-                        self.id.clone(),
-                        format!(
-                            "Task '{}' depends on channel '{}' which is not produced by any upstream task output",
-                            task.id, dep_channel_id
-                        ),
-                    )));
+            for (port_name, channel_ids) in &task.dependencies {
+                for dep_channel_id in channel_ids {
+                    if !available_channels.contains(dep_channel_id.as_str()) {
+                        return Err(EngineError::Workflow(WorkflowError::InvalidConfig(
+                            self.id.clone(),
+                            format!(
+                                "Task '{}' port '{}' depends on channel '{}' which is not produced by any upstream task output",
+                                task.id, port_name, dep_channel_id
+                            ),
+                        )));
+                    }
                 }
             }
         }
@@ -428,9 +457,11 @@ impl<'r> WorkflowBuilder<'r> {
         let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in &self.tasks {
             let mut upstream_tasks = Vec::new();
-            for dep_channel_id in &task.dependencies {
-                if let Some(&upstream_task_id) = channel_to_task.get(dep_channel_id.as_str()) {
-                    upstream_tasks.push(upstream_task_id);
+            for (_port, channel_ids) in &task.dependencies {
+                for dep_channel_id in channel_ids {
+                    if let Some(&upstream_task_id) = channel_to_task.get(dep_channel_id.as_str()) {
+                        upstream_tasks.push(upstream_task_id);
+                    }
                 }
             }
             graph.insert(&task.id, upstream_tasks);

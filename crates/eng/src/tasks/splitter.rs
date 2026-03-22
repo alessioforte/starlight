@@ -5,9 +5,9 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
-use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
+use jb::{as_f64, get};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -162,7 +162,10 @@ impl Splitter {
             }
             SplitMode::Ranges(ranges) => {
                 let n = as_f64(field_val)?;
-                ranges.iter().find(|r| r.matches(n)).map(|r| r.output.clone())
+                ranges
+                    .iter()
+                    .find(|r| r.matches(n))
+                    .map(|r| r.output.clone())
             }
         }
     }
@@ -222,9 +225,10 @@ impl Task for Splitter {
             match input.recv().await {
                 Ok(msg) => {
                     let label = self.route(&msg);
-                    let target_label = label
-                        .as_deref()
-                        .or(self.base.params.default_output.as_deref());
+                    let target_label =
+                        label
+                            .as_deref()
+                            .or(self.base.params.default_output.as_deref());
 
                     match target_label {
                         Some(lbl) => {
@@ -361,9 +365,21 @@ mod tests {
     #[test]
     fn test_ranges_mode() {
         let ranges = vec![
-            RangeRoute { min: None, max: Some(50.0), output: "low".into() },
-            RangeRoute { min: Some(50.0), max: Some(80.0), output: "mid".into() },
-            RangeRoute { min: Some(80.0), max: None, output: "high".into() },
+            RangeRoute {
+                min: None,
+                max: Some(50.0),
+                output: "low".into(),
+            },
+            RangeRoute {
+                min: Some(50.0),
+                max: Some(80.0),
+                output: "mid".into(),
+            },
+            RangeRoute {
+                min: Some(80.0),
+                max: None,
+                output: "high".into(),
+            },
         ];
         let s = make_splitter("score", SplitMode::Ranges(ranges), None);
 
@@ -377,18 +393,22 @@ mod tests {
 
     #[test]
     fn test_ranges_mode_non_numeric() {
-        let ranges = vec![
-            RangeRoute { min: None, max: Some(10.0), output: "low".into() },
-        ];
+        let ranges = vec![RangeRoute {
+            min: None,
+            max: Some(10.0),
+            output: "low".into(),
+        }];
         let s = make_splitter("val", SplitMode::Ranges(ranges), None);
         assert_eq!(s.route(&json!({"val": "not a number"})), None);
     }
 
     #[test]
     fn test_ranges_unbounded() {
-        let ranges = vec![
-            RangeRoute { min: None, max: None, output: "catch_all".into() },
-        ];
+        let ranges = vec![RangeRoute {
+            min: None,
+            max: None,
+            output: "catch_all".into(),
+        }];
         let s = make_splitter("x", SplitMode::Ranges(ranges), None);
         assert_eq!(s.route(&json!({"x": -999})), Some("catch_all".into()));
         assert_eq!(s.route(&json!({"x": 999})), Some("catch_all".into()));
@@ -398,7 +418,11 @@ mod tests {
 
     #[test]
     fn test_range_route_matches() {
-        let r = RangeRoute { min: Some(10.0), max: Some(20.0), output: "a".into() };
+        let r = RangeRoute {
+            min: Some(10.0),
+            max: Some(20.0),
+            output: "a".into(),
+        };
         assert!(!r.matches(9.9));
         assert!(r.matches(10.0));
         assert!(r.matches(15.0));

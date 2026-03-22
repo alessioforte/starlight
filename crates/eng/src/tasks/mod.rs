@@ -70,7 +70,10 @@ impl TaskRegistry {
         r.register("json_mapper", json_mapper::JsonMapper::create);
         r.register("logger", logger::Logger::create);
         r.register("math_exp_eval", math_exp_eval::MathExpEval::create);
-        r.register("number_generator", number_generator::NumberGenerator::create);
+        r.register(
+            "number_generator",
+            number_generator::NumberGenerator::create,
+        );
         r.register("splitter", splitter::Splitter::create);
         r.register("timer", timer::Timer::create);
         r.register("type_converter", type_converter::TypeConverter::create);
@@ -86,11 +89,20 @@ impl TaskRegistry {
     }
 
     /// Instantiate a task by type name.
-    pub fn create(&self, type_name: &str, id: String, params: serde_json::Value) -> Result<Box<dyn Task>> {
+    pub fn create(
+        &self,
+        type_name: &str,
+        id: String,
+        params: serde_json::Value,
+    ) -> Result<Box<dyn Task>> {
         let factory = self.factories.get(type_name).ok_or_else(|| {
             EngineError::invalid_params(
                 &id,
-                format!("unknown task type '{}'. Available: {:?}", type_name, self.list()),
+                format!(
+                    "unknown task type '{}'. Available: {:?}",
+                    type_name,
+                    self.list()
+                ),
             )
         })?;
         (factory)(id, params)
@@ -166,7 +178,10 @@ mod tests {
         let mut r = TaskRegistry::with_builtins();
         r.register("my_custom", my_create as CreateFn);
         assert!(r.contains("my_custom"));
-        assert!(r.create("my_custom", "c1".into(), serde_json::json!({})).is_ok());
+        assert!(
+            r.create("my_custom", "c1".into(), serde_json::json!({}))
+                .is_ok()
+        );
     }
 
     #[test]

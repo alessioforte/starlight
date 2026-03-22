@@ -60,8 +60,7 @@ impl Engine {
     }
 
     pub fn add(&mut self, config: Config) -> Result<&Workflow> {
-        let mut builder = WorkflowBuilder::new(config.id.clone(), &self.registry)
-            .name(config.name);
+        let mut builder = WorkflowBuilder::new(config.id.clone(), &self.registry).name(config.name);
 
         if let Some(desc) = config.description {
             builder = builder.description(desc);

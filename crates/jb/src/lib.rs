@@ -101,9 +101,7 @@ pub fn set(root: &mut Value, path: &str, val: Value) {
             return;
         }
         if let Value::Object(map) = current {
-            current = map
-                .entry(part.to_string())
-                .or_insert_with(|| json!({}));
+            current = map.entry(part.to_string()).or_insert_with(|| json!({}));
         } else {
             return;
         }
@@ -515,7 +513,10 @@ mod tests {
     #[test]
     fn test_builder_set_value_invalid_path() {
         let mut b = JsonBuilder::new(json!({}));
-        assert_eq!(b.set_value("a..b", json!(1)), Err(JsonPathError::InvalidPath));
+        assert_eq!(
+            b.set_value("a..b", json!(1)),
+            Err(JsonPathError::InvalidPath)
+        );
     }
 
     #[test]

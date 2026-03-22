@@ -62,15 +62,16 @@ impl Input {
     /// Blocks until a message is available or the channel is closed.
     /// Automatically updates metrics counters when configured.
     pub async fn recv(&mut self) -> Result<Value> {
-        let val = self.rx.recv().await.ok_or_else(|| {
-            EngineError::Channel(ChannelError::Closed(self.id.clone()))
-        })?;
+        let val = self
+            .rx
+            .recv()
+            .await
+            .ok_or_else(|| EngineError::Channel(ChannelError::Closed(self.id.clone())))?;
 
         if let Some(m) = &self.metrics {
             m.messages_in.fetch_add(1, Ordering::Relaxed);
             if let Some(c) = &self.clock {
-                m.last_message_at
-                    .store(c.now_millis(), Ordering::Relaxed);
+                m.last_message_at.store(c.now_millis(), Ordering::Relaxed);
             }
         }
 
@@ -88,8 +89,7 @@ impl Input {
                 if let Some(m) = &self.metrics {
                     m.messages_in.fetch_add(1, Ordering::Relaxed);
                     if let Some(c) = &self.clock {
-                        m.last_message_at
-                            .store(c.now_millis(), Ordering::Relaxed);
+                        m.last_message_at.store(c.now_millis(), Ordering::Relaxed);
                     }
                 }
                 Ok(Some(val))
@@ -207,7 +207,7 @@ impl std::fmt::Debug for Output {
 /// Task execution context
 ///
 /// Provides everything a task needs to interact with the workflow:
-/// - Input channels (mpsc receivers — consumed on first access)
+/// - Input channels via named ports (mpsc receivers — consumed on first access)
 /// - Output channels (mpsc senders with backpressure)
 /// - Running / paused / stopped state
 ///
@@ -217,12 +217,13 @@ pub struct TaskContext {
     /// Unique task identifier
     pub id: String,
 
-    /// Names of the input channels (for metadata queries — always available)
-    input_names: Arc<Vec<String>>,
+    /// Names of the input ports (for metadata queries — always available)
+    input_port_names: Arc<Vec<String>>,
 
-    /// Input receivers, keyed by channel ID.
+    /// Input receivers, keyed by port name.
+    /// Each port can have multiple channels (channel_id, Receiver).
     /// Behind a Mutex because `mpsc::Receiver` is not Clone and must be *taken*.
-    inputs: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Receiver<Value>>>>,
+    inputs: Arc<tokio::sync::Mutex<HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>>>,
 
     /// Output senders, keyed by label
     outputs: Arc<HashMap<String, Vec<mpsc::Sender<Value>>>>,
@@ -251,9 +252,12 @@ pub struct TaskContext {
 
 impl TaskContext {
     /// Create a new task context (no clock — useful for tests)
+    ///
+    /// `inputs` is keyed by port name; each port maps to a list of
+    /// `(channel_id, Receiver)` pairs.
     pub fn new(
         id: String,
-        inputs: HashMap<String, mpsc::Receiver<Value>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
     ) -> Self {
         Self::build(id, inputs, outputs, 1000, None)
@@ -262,7 +266,7 @@ impl TaskContext {
     /// Create a new task context with explicit capacity and optional clock
     pub fn with_capacity(
         id: String,
-        inputs: HashMap<String, mpsc::Receiver<Value>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
@@ -272,15 +276,15 @@ impl TaskContext {
 
     fn build(
         id: String,
-        inputs: HashMap<String, mpsc::Receiver<Value>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
-        let input_names: Vec<String> = inputs.keys().cloned().collect();
+        let port_names: Vec<String> = inputs.keys().cloned().collect();
         Self {
             id,
-            input_names: Arc::new(input_names),
+            input_port_names: Arc::new(port_names),
             inputs: Arc::new(tokio::sync::Mutex::new(inputs)),
             outputs: Arc::new(outputs),
             channel_capacity,
@@ -294,46 +298,52 @@ impl TaskContext {
     }
 
     // ------------------------------------------------------------------
-    // Input access  (each method *takes* the receiver — one-shot)
+    // Input access  (each method *takes* receivers — one-shot)
     // ------------------------------------------------------------------
 
-    /// Get an input channel by channel ID
+    /// Get an input by port name
     ///
-    /// The receiver is **moved** out of the context: calling this twice
-    /// with the same `channel_id` returns `InputNotFound` on the second call.
-    pub async fn input(&self, channel_id: &str) -> Result<Input> {
+    /// Takes all receivers for the given port and merges them into a single
+    /// `Input`. If the port has exactly one channel, no merging overhead.
+    ///
+    /// The receivers are **moved** out: calling this twice with the same
+    /// port name returns `InputNotFound` on the second call.
+    pub async fn input(&self, port: &str) -> Result<Input> {
         let mut inputs = self.inputs.lock().await;
-        let rx = inputs.remove(channel_id).ok_or_else(|| {
-            EngineError::Channel(ChannelError::InputNotFound(channel_id.to_string()))
-        })?;
-        Ok(Input::with_metrics(
-            channel_id.to_string(),
-            rx,
-            Arc::clone(&self.metrics),
-            self.clock.clone(),
-        ))
+        let receivers = inputs
+            .remove(port)
+            .ok_or_else(|| EngineError::Channel(ChannelError::InputNotFound(port.to_string())))?;
+
+        self.merge_receivers(port.to_string(), receivers)
     }
 
-    /// Get all input channels
+    /// Get a merged input that receives from ALL input ports
     ///
-    /// Drains every receiver from the context.
-    pub async fn inputs(&self) -> Result<Vec<Input>> {
-        let mut inputs = self.inputs.lock().await;
-        let result = inputs
-            .drain()
-            .map(|(id, rx)| {
-                Input::with_metrics(id, rx, Arc::clone(&self.metrics), self.clock.clone())
-            })
-            .collect();
-        Ok(result)
-    }
-
-    /// Get a merged input that receives from all input channels
-    ///
-    /// If there is a single input it is returned directly (zero overhead).
-    /// For multiple inputs a small set of forwarding tasks is spawned;
-    /// they terminate automatically when the upstream senders drop.
+    /// If there is a single receiver across all ports it is returned
+    /// directly (zero overhead). For multiple receivers a small set of
+    /// forwarding tasks is spawned; they terminate automatically when
+    /// the upstream senders drop.
     pub async fn merged_input(&self) -> Result<Input> {
+        let mut inputs = self.inputs.lock().await;
+
+        // Flatten all ports into a single Vec of receivers
+        let all_receivers: Vec<(String, mpsc::Receiver<Value>)> =
+            inputs.drain().flat_map(|(_, rxs)| rxs).collect();
+
+        if all_receivers.is_empty() {
+            return Err(EngineError::Channel(ChannelError::InputNotFound(
+                "(no inputs available)".to_string(),
+            )));
+        }
+
+        self.merge_receivers("merged".to_string(), all_receivers)
+    }
+
+    /// Get one merged `Input` per port name
+    ///
+    /// Useful for tasks that need to process each port independently
+    /// (e.g., a Join with `"left"` and `"right"` ports).
+    pub async fn named_inputs(&self) -> Result<HashMap<String, Input>> {
         let mut inputs = self.inputs.lock().await;
 
         if inputs.is_empty() {
@@ -342,22 +352,72 @@ impl TaskContext {
             )));
         }
 
-        // Fast path: single input — no forwarding needed
-        if inputs.len() == 1 {
-            let (id, rx) = inputs.drain().next().unwrap();
+        let mut result = HashMap::new();
+        for (port, receivers) in inputs.drain() {
+            let input = self.merge_receivers(port.clone(), receivers)?;
+            result.insert(port, input);
+        }
+        Ok(result)
+    }
+
+    /// Get all input channels as a flat list
+    ///
+    /// Drains every receiver from every port.
+    pub async fn inputs(&self) -> Result<Vec<Input>> {
+        let mut inputs = self.inputs.lock().await;
+        let result = inputs
+            .drain()
+            .flat_map(|(_, rxs)| rxs)
+            .map(|(id, rx)| {
+                Input::with_metrics(id, rx, Arc::clone(&self.metrics), self.clock.clone())
+            })
+            .collect();
+        Ok(result)
+    }
+
+    /// Get the first available input channel
+    ///
+    /// Convenience for tasks with a single input port.
+    pub async fn first_input(&self) -> Result<Input> {
+        let mut inputs = self.inputs.lock().await;
+        let key = inputs.keys().next().cloned().ok_or_else(|| {
+            EngineError::Channel(ChannelError::InputNotFound(
+                "(no inputs available)".to_string(),
+            ))
+        })?;
+        let receivers = inputs.remove(&key).unwrap();
+        self.merge_receivers(key, receivers)
+    }
+
+    /// Internal helper: merge a list of (channel_id, Receiver) into a single Input.
+    ///
+    /// Fast path for single receiver (zero overhead).
+    fn merge_receivers(
+        &self,
+        name: String,
+        mut receivers: Vec<(String, mpsc::Receiver<Value>)>,
+    ) -> Result<Input> {
+        if receivers.is_empty() {
+            return Err(EngineError::Channel(ChannelError::InputNotFound(name)));
+        }
+
+        // Fast path: single receiver — no forwarding needed
+        if receivers.len() == 1 {
+            let (channel_id, rx) = receivers.pop().unwrap();
+            let label = if name == channel_id { name } else { name };
             return Ok(Input::with_metrics(
-                id,
+                label,
                 rx,
                 Arc::clone(&self.metrics),
                 self.clock.clone(),
             ));
         }
 
-        // Multiple inputs: merge into a single mpsc channel
+        // Multiple receivers: merge into a single mpsc channel
         let (merged_tx, merged_rx) = mpsc::channel(self.channel_capacity);
         let mut abort_handles = Vec::new();
 
-        for (channel_id, mut rx) in inputs.drain() {
+        for (channel_id, mut rx) in receivers {
             let tx = merged_tx.clone();
             let handle = tokio::spawn(async move {
                 while let Some(value) = rx.recv().await {
@@ -379,27 +439,8 @@ impl TaskContext {
             .extend(abort_handles);
 
         Ok(Input::with_metrics(
-            "merged".to_string(),
+            name,
             merged_rx,
-            Arc::clone(&self.metrics),
-            self.clock.clone(),
-        ))
-    }
-
-    /// Get the first available input channel
-    ///
-    /// Convenience for tasks with a single input.
-    pub async fn first_input(&self) -> Result<Input> {
-        let mut inputs = self.inputs.lock().await;
-        let key = inputs.keys().next().cloned().ok_or_else(|| {
-            EngineError::Channel(ChannelError::InputNotFound(
-                "(no inputs available)".to_string(),
-            ))
-        })?;
-        let rx = inputs.remove(&key).unwrap();
-        Ok(Input::with_metrics(
-            key,
-            rx,
             Arc::clone(&self.metrics),
             self.clock.clone(),
         ))
@@ -472,10 +513,7 @@ impl TaskContext {
         self.resume_notify.notify_waiters();
 
         // Cancel any merged-input forwarder tasks
-        let handles = self
-            .forwarders
-            .lock()
-            .expect("forwarders mutex poisoned");
+        let handles = self.forwarders.lock().expect("forwarders mutex poisoned");
         for h in handles.iter() {
             h.abort();
         }
@@ -494,14 +532,14 @@ impl TaskContext {
     // Metadata (always synchronous, never consumes receivers)
     // ------------------------------------------------------------------
 
-    /// Get list of input channel IDs configured at build time
-    pub fn input_ids(&self) -> Vec<&str> {
-        self.input_names.iter().map(|s| s.as_str()).collect()
+    /// Get list of input port names configured at build time
+    pub fn input_ports(&self) -> Vec<&str> {
+        self.input_port_names.iter().map(|s| s.as_str()).collect()
     }
 
-    /// Number of input channels configured at build time
+    /// Number of input ports configured at build time
     pub fn input_count(&self) -> usize {
-        self.input_names.len()
+        self.input_port_names.len()
     }
 
     /// Get list of available output labels
@@ -511,7 +549,7 @@ impl TaskContext {
 
     /// Check if this is a source task (no inputs)
     pub fn is_source(&self) -> bool {
-        self.input_names.is_empty()
+        self.input_port_names.is_empty()
     }
 
     /// Check if this is a sink task (no outputs)
@@ -524,7 +562,7 @@ impl std::fmt::Debug for TaskContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TaskContext")
             .field("id", &self.id)
-            .field("inputs", &self.input_ids())
+            .field("input_ports", &self.input_ports())
             .field("outputs", &self.output_labels())
             .field("is_running", &self.is_running())
             .finish()
@@ -540,6 +578,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
+
+    /// Helper: create a port-keyed input map from a list of (port, channel_id, Receiver).
+    fn make_inputs(
+        entries: Vec<(&str, &str, mpsc::Receiver<Value>)>,
+    ) -> HashMap<String, Vec<(String, mpsc::Receiver<Value>)>> {
+        let mut map: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>> = HashMap::new();
+        for (port, ch_id, rx) in entries {
+            map.entry(port.to_string())
+                .or_default()
+                .push((ch_id.to_string(), rx));
+        }
+        map
+    }
 
     #[tokio::test]
     async fn test_input_output() {
@@ -571,32 +622,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_with_channels() {
-        let mut inputs = HashMap::new();
-        let mut outputs: HashMap<String, Vec<mpsc::Sender<Value>>> = HashMap::new();
-
         let (_tx1, rx1) = mpsc::channel(10);
         let (tx2, _rx2) = mpsc::channel(10);
 
-        inputs.insert("input1".to_string(), rx1);
+        let inputs = make_inputs(vec![("in", "input1", rx1)]);
+        let mut outputs: HashMap<String, Vec<mpsc::Sender<Value>>> = HashMap::new();
         outputs.insert("out1".to_string(), vec![tx2]);
 
         let ctx = TaskContext::new("task1".to_string(), inputs, outputs);
 
         assert!(!ctx.is_source());
         assert!(!ctx.is_sink());
-        assert_eq!(ctx.input_ids(), vec!["input1"]);
+        assert_eq!(ctx.input_ports(), vec!["in"]);
         assert_eq!(ctx.output_labels(), vec!["out1"]);
     }
 
     #[tokio::test]
     async fn test_merged_input() {
-        let mut inputs = HashMap::new();
-
         let (tx1, rx1) = mpsc::channel(10);
         let (tx2, rx2) = mpsc::channel(10);
 
-        inputs.insert("input1".to_string(), rx1);
-        inputs.insert("input2".to_string(), rx2);
+        let inputs = make_inputs(vec![("in", "input1", rx1), ("in", "input2", rx2)]);
 
         let ctx = Arc::new(TaskContext::new(
             "task1".to_string(),
@@ -611,8 +657,12 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Send messages to both input channels
-        tx1.send(json!({"source": "input1", "value": 1})).await.unwrap();
-        tx2.send(json!({"source": "input2", "value": 2})).await.unwrap();
+        tx1.send(json!({"source": "input1", "value": 1}))
+            .await
+            .unwrap();
+        tx2.send(json!({"source": "input2", "value": 2}))
+            .await
+            .unwrap();
 
         // Should receive from both channels
         let msg1 = merged.recv().await.unwrap();
@@ -629,15 +679,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_forwarders_aborted_on_stop() {
-        let mut inputs = HashMap::new();
+    async fn test_merged_input_across_ports() {
+        let (tx1, rx1) = mpsc::channel(10);
+        let (tx2, rx2) = mpsc::channel(10);
 
-        // Two inputs → merged_input will spawn 2 forwarder tasks
+        // Two different ports — merged_input should merge both
+        let inputs = make_inputs(vec![("left", "ch_left", rx1), ("right", "ch_right", rx2)]);
+
+        let ctx = Arc::new(TaskContext::new(
+            "task1".to_string(),
+            inputs,
+            HashMap::new(),
+        ));
+
+        let mut merged = ctx.merged_input().await.unwrap();
+        tokio::task::yield_now().await;
+
+        tx1.send(json!({"side": "left"})).await.unwrap();
+        tx2.send(json!({"side": "right"})).await.unwrap();
+
+        let msg1 = merged.recv().await.unwrap();
+        let msg2 = merged.recv().await.unwrap();
+
+        let sides: Vec<&str> = vec![
+            msg1["side"].as_str().unwrap(),
+            msg2["side"].as_str().unwrap(),
+        ];
+        assert!(sides.contains(&"left"));
+        assert!(sides.contains(&"right"));
+    }
+
+    #[tokio::test]
+    async fn test_input_by_port_name() {
+        let (tx1, rx1) = mpsc::channel(10);
+        let (tx2, rx2) = mpsc::channel(10);
+
+        let inputs = make_inputs(vec![("left", "ch_csv", rx1), ("right", "ch_api", rx2)]);
+
+        let ctx = Arc::new(TaskContext::new(
+            "join1".to_string(),
+            inputs,
+            HashMap::new(),
+        ));
+
+        let mut left = ctx.input("left").await.unwrap();
+        let mut right = ctx.input("right").await.unwrap();
+
+        tx1.send(json!({"from": "csv"})).await.unwrap();
+        tx2.send(json!({"from": "api"})).await.unwrap();
+
+        let l = left.recv().await.unwrap();
+        let r = right.recv().await.unwrap();
+
+        assert_eq!(l["from"], "csv");
+        assert_eq!(r["from"], "api");
+    }
+
+    #[tokio::test]
+    async fn test_named_inputs() {
+        let (tx1, rx1) = mpsc::channel(10);
+        let (tx2, rx2) = mpsc::channel(10);
+
+        let inputs = make_inputs(vec![("left", "ch1", rx1), ("right", "ch2", rx2)]);
+
+        let ctx = Arc::new(TaskContext::new(
+            "join1".to_string(),
+            inputs,
+            HashMap::new(),
+        ));
+
+        let mut named = ctx.named_inputs().await.unwrap();
+        assert_eq!(named.len(), 2);
+        assert!(named.contains_key("left"));
+        assert!(named.contains_key("right"));
+
+        tx1.send(json!("L")).await.unwrap();
+        tx2.send(json!("R")).await.unwrap();
+
+        let l = named.get_mut("left").unwrap().recv().await.unwrap();
+        let r = named.get_mut("right").unwrap().recv().await.unwrap();
+        assert_eq!(l, json!("L"));
+        assert_eq!(r, json!("R"));
+    }
+
+    #[tokio::test]
+    async fn test_input_port_not_found() {
+        let ctx = TaskContext::new("t".to_string(), HashMap::new(), HashMap::new());
+        let result = ctx.input("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_forwarders_aborted_on_stop() {
         let (tx1, rx1) = mpsc::channel(10);
         let (_tx2, rx2) = mpsc::channel(10);
 
-        inputs.insert("a".to_string(), rx1);
-        inputs.insert("b".to_string(), rx2);
+        let inputs = make_inputs(vec![("in", "a", rx1), ("in", "b", rx2)]);
 
         let ctx = Arc::new(TaskContext::new(
             "task1".to_string(),
@@ -697,11 +834,17 @@ mod tests {
 
         // Give the send a moment to attempt (it should be blocked)
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        assert!(!send_handle.is_finished(), "send should be blocked by backpressure");
+        assert!(
+            !send_handle.is_finished(),
+            "send should be blocked by backpressure"
+        );
 
         // Drain one message — this should unblock the send
         let _ = input.recv().await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        assert!(send_handle.is_finished(), "send should have completed after drain");
+        assert!(
+            send_handle.is_finished(),
+            "send should have completed after drain"
+        );
     }
 }

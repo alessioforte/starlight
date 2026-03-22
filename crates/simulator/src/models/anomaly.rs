@@ -1,6 +1,6 @@
 use super::Model;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 /// Injects occasional spikes or dips around a baseline model.
 /// The anomaly event is sampled independently each `generate` call.
@@ -27,7 +27,14 @@ impl AnomalyModel {
         max_magnitude: f64,
         bidirectional: bool,
     ) -> Self {
-        Self::with_seed(base, probability, min_magnitude, max_magnitude, bidirectional, rand::random())
+        Self::with_seed(
+            base,
+            probability,
+            min_magnitude,
+            max_magnitude,
+            bidirectional,
+            rand::random(),
+        )
     }
 
     pub fn with_seed(
@@ -55,7 +62,9 @@ impl Model for AnomalyModel {
 
         let roll: f64 = self.rng.random();
         if roll < self.probability {
-            let magnitude = self.rng.random_range(self.min_magnitude..=self.max_magnitude);
+            let magnitude = self
+                .rng
+                .random_range(self.min_magnitude..=self.max_magnitude);
             let sign = if self.bidirectional {
                 if self.rng.random::<bool>() { 1.0 } else { -1.0 }
             } else {

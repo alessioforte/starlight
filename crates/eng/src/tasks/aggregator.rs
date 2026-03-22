@@ -5,9 +5,9 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
-use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
+use jb::{as_f64, get};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -140,10 +140,7 @@ impl Window {
                 AggFn::Min => {
                     if seen_min.insert(&col.field) {
                         if let Some(n) = get(msg, &col.field).and_then(as_f64) {
-                            let entry = self
-                                .mins
-                                .entry(col.field.clone())
-                                .or_insert(f64::INFINITY);
+                            let entry = self.mins.entry(col.field.clone()).or_insert(f64::INFINITY);
                             if n < *entry {
                                 *entry = n;
                             }
@@ -205,7 +202,11 @@ impl Window {
                     _ => json!(null),
                 },
                 AggFn::Collect => {
-                    let arr = self.collections.get(&col.field).cloned().unwrap_or_default();
+                    let arr = self
+                        .collections
+                        .get(&col.field)
+                        .cloned()
+                        .unwrap_or_default();
                     json!(arr)
                 }
             };
@@ -259,7 +260,7 @@ fn group_key(msg: &Value, group_by: &Option<String>) -> String {
 ///
 /// | Label   | Description                |
 /// |---------|----------------------------|
-/// | `"out"` | Aggregated result objects   |
+/// | `"out"` | Aggregated result objects  |
 ///
 /// # Example Configuration
 ///
@@ -386,9 +387,7 @@ impl Task for Aggregator {
                     window.push(&msg, &params.columns);
 
                     // Check count trigger
-                    if window.count_ready(params.window_count)
-                        || window.time_ready(time_limit)
-                    {
+                    if window.count_ready(params.window_count) || window.time_ready(time_limit) {
                         Self::flush_window(
                             window,
                             &key,
@@ -439,14 +438,7 @@ impl Task for Aggregator {
         // Flush any remaining open windows
         for (key, window) in &windows {
             if window.count > 0 {
-                Self::flush_window(
-                    window,
-                    key,
-                    &params.group_by,
-                    &params.columns,
-                    &output,
-                )
-                .await?;
+                Self::flush_window(window, key, &params.group_by, &params.columns, &output).await?;
                 emitted += 1;
             }
         }

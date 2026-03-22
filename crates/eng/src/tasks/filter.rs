@@ -5,9 +5,9 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
-use jb::{as_f64, get};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
+use jb::{as_f64, get};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -151,9 +151,7 @@ impl Filter {
     /// - Array field: checks if array includes the value
     fn eval_contains(field: Option<&Value>, target: &Value) -> bool {
         match field {
-            Some(Value::String(s)) => {
-                target.as_str().is_some_and(|t| s.contains(t))
-            }
+            Some(Value::String(s)) => target.as_str().is_some_and(|t| s.contains(t)),
             Some(Value::Array(arr)) => arr.contains(target),
             _ => false,
         }

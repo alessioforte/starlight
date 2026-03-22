@@ -5,8 +5,8 @@
 //! Tasks read it with a single `AtomicI64` load — zero overhead.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------

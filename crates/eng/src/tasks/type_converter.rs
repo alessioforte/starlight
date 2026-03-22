@@ -5,9 +5,9 @@
 
 use crate::ctx::TaskContext;
 use crate::err::Result;
-use jb::{get, get_mut, remove};
 use crate::task::{BaseTask, Task, TaskInfo};
 use async_trait::async_trait;
+use jb::{get, get_mut, remove};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -312,10 +312,7 @@ impl Task for TypeConverter {
                     }
                 }
                 Err(_) => {
-                    tracing::debug!(
-                        "TypeConverter [{}]: Input channel closed",
-                        self.base.id,
-                    );
+                    tracing::debug!("TypeConverter [{}]: Input channel closed", self.base.id,);
                     break;
                 }
             }
@@ -349,7 +346,10 @@ mod tests {
 
     #[test]
     fn test_to_string_from_bool() {
-        assert_eq!(convert(&json!(true), &TargetType::String), Some(json!("true")));
+        assert_eq!(
+            convert(&json!(true), &TargetType::String),
+            Some(json!("true"))
+        );
     }
 
     #[test]
@@ -359,7 +359,10 @@ mod tests {
 
     #[test]
     fn test_to_string_from_string() {
-        assert_eq!(convert(&json!("hi"), &TargetType::String), Some(json!("hi")));
+        assert_eq!(
+            convert(&json!("hi"), &TargetType::String),
+            Some(json!("hi"))
+        );
     }
 
     #[test]
@@ -385,7 +388,10 @@ mod tests {
 
     #[test]
     fn test_to_float_from_string() {
-        assert_eq!(convert(&json!("3.14"), &TargetType::Float), Some(json!(3.14)));
+        assert_eq!(
+            convert(&json!("3.14"), &TargetType::Float),
+            Some(json!(3.14))
+        );
     }
 
     #[test]
@@ -395,15 +401,24 @@ mod tests {
 
     #[test]
     fn test_to_bool_from_string() {
-        assert_eq!(convert(&json!("true"), &TargetType::Bool), Some(json!(true)));
+        assert_eq!(
+            convert(&json!("true"), &TargetType::Bool),
+            Some(json!(true))
+        );
         assert_eq!(convert(&json!("yes"), &TargetType::Bool), Some(json!(true)));
         assert_eq!(convert(&json!("1"), &TargetType::Bool), Some(json!(true)));
-        assert_eq!(convert(&json!("false"), &TargetType::Bool), Some(json!(false)));
+        assert_eq!(
+            convert(&json!("false"), &TargetType::Bool),
+            Some(json!(false))
+        );
         assert_eq!(convert(&json!("no"), &TargetType::Bool), Some(json!(false)));
         assert_eq!(convert(&json!("0"), &TargetType::Bool), Some(json!(false)));
         assert_eq!(convert(&json!(""), &TargetType::Bool), Some(json!(false)));
         assert_eq!(convert(&json!("on"), &TargetType::Bool), Some(json!(true)));
-        assert_eq!(convert(&json!("off"), &TargetType::Bool), Some(json!(false)));
+        assert_eq!(
+            convert(&json!("off"), &TargetType::Bool),
+            Some(json!(false))
+        );
     }
 
     #[test]
@@ -470,12 +485,18 @@ mod tests {
     #[test]
     fn test_to_array_scalar() {
         assert_eq!(convert(&json!(42), &TargetType::Array), Some(json!([42])));
-        assert_eq!(convert(&json!("hi"), &TargetType::Array), Some(json!(["hi"])));
+        assert_eq!(
+            convert(&json!("hi"), &TargetType::Array),
+            Some(json!(["hi"]))
+        );
     }
 
     #[test]
     fn test_to_array_already_array() {
-        assert_eq!(convert(&json!([1, 2]), &TargetType::Array), Some(json!([1, 2])));
+        assert_eq!(
+            convert(&json!([1, 2]), &TargetType::Array),
+            Some(json!([1, 2]))
+        );
     }
 
     #[test]
@@ -551,9 +572,21 @@ mod tests {
     fn test_apply_multiple_conversions() {
         let tc = make_converter(
             vec![
-                Conversion { field: "age".into(), target: TargetType::Int, remove_on_error: false },
-                Conversion { field: "active".into(), target: TargetType::Bool, remove_on_error: false },
-                Conversion { field: "score".into(), target: TargetType::Float, remove_on_error: false },
+                Conversion {
+                    field: "age".into(),
+                    target: TargetType::Int,
+                    remove_on_error: false,
+                },
+                Conversion {
+                    field: "active".into(),
+                    target: TargetType::Bool,
+                    remove_on_error: false,
+                },
+                Conversion {
+                    field: "score".into(),
+                    target: TargetType::Float,
+                    remove_on_error: false,
+                },
             ],
             MissingField::Ignore,
         );

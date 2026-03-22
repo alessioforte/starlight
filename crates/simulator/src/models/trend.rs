@@ -18,11 +18,15 @@ pub struct TrendModel {
 
 impl TrendModel {
     pub fn linear(slope: f64, intercept: f64) -> Self {
-        Self { kind: TrendKind::Linear { slope, intercept } }
+        Self {
+            kind: TrendKind::Linear { slope, intercept },
+        }
     }
 
     pub fn exponential(initial: f64, rate: f64) -> Self {
-        Self { kind: TrendKind::Exponential { initial, rate } }
+        Self {
+            kind: TrendKind::Exponential { initial, rate },
+        }
     }
 }
 
