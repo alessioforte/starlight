@@ -46,6 +46,7 @@ pub type CreateFn = fn(String, serde_json::Value) -> Result<Box<dyn Task>>;
 /// let mut registry = TaskRegistry::with_builtins();
 /// registry.register("my_task", my_task_create);
 /// ```
+#[derive(Clone)]
 pub struct TaskRegistry {
     factories: HashMap<String, CreateFn>,
 }

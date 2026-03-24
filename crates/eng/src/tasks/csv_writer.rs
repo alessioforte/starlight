@@ -259,7 +259,7 @@ impl Task for CsvWriter {
                 Ok(msg) => {
                     // Auto-detect columns from first message
                     if columns.is_none() {
-                        if let Value::Object(map) = &msg {
+                        if let Value::Object(map) = msg.as_ref() {
                             let cols: Vec<String> = map.keys().cloned().collect();
                             if need_header {
                                 let header_line = cols.join(&params.delimiter.to_string());
@@ -488,8 +488,12 @@ mod tests {
         let task = CsvWriter::create("writer".into(), params).unwrap();
 
         // Send some messages then close
-        tx.send(json!({"name": "Alice", "age": 30})).await.unwrap();
-        tx.send(json!({"name": "Bob", "age": 25})).await.unwrap();
+        tx.send(json!({"name": "Alice", "age": 30}).into())
+            .await
+            .unwrap();
+        tx.send(json!({"name": "Bob", "age": 25}).into())
+            .await
+            .unwrap();
         drop(tx);
 
         // Run task

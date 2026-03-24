@@ -195,7 +195,7 @@ fn convert(value: &Value, target: &TargetType) -> Option<Value> {
 ///
 /// | Label   | Description                          |
 /// |---------|--------------------------------------|
-/// | `"out"` | Messages with converted field types   |
+/// | `"out"` | Messages with converted field types  |
 ///
 /// # Example Configuration
 ///
@@ -298,9 +298,10 @@ impl Task for TypeConverter {
 
         while ctx.running().await {
             match input.recv().await {
-                Ok(mut msg) => {
+                Ok(msg) => {
+                    let mut msg = msg.into_owned();
                     self.apply(&mut msg);
-                    output.send(msg).await?;
+                    output.send(msg.into()).await?;
                     processed += 1;
 
                     if processed % 10_000 == 0 {

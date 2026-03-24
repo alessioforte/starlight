@@ -200,7 +200,7 @@ impl Task for CsvReader {
             }
 
             // Send to output (async — applies backpressure)
-            output.send(Value::Object(record)).await?;
+            output.send(Value::Object(record).into()).await?;
             records_sent += 1;
 
             // Update state

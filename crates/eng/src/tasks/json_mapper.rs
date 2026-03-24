@@ -130,7 +130,8 @@ impl Task for JsonMapper {
         // Process messages
         while ctx.running().await {
             match input.recv().await {
-                Ok(value) => {
+                Ok(msg) => {
+                    let value = msg.as_ref();
                     let mut result = if params.pass_through {
                         // Start with a copy of the original
                         value.clone()
@@ -142,7 +143,7 @@ impl Task for JsonMapper {
                     // Apply mappings
                     if let Value::Object(ref mut result_map) = result {
                         for (output_field, input_path) in &params.mappings {
-                            if let Some(val) = get(&value, input_path) {
+                            if let Some(val) = get(value, input_path) {
                                 result_map.insert(output_field.clone(), val.clone());
                             } else {
                                 tracing::trace!(
@@ -155,7 +156,7 @@ impl Task for JsonMapper {
                     }
 
                     // Send to output (async — applies backpressure)
-                    output.send(result).await?;
+                    output.send(result.into()).await?;
                     processed += 1;
 
                     if processed % 1000 == 0 {

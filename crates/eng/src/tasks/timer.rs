@@ -196,7 +196,7 @@ impl Task for Timer {
                 // Optionally emit immediately
                 if self.base.params.immediate && !self.limit_reached() {
                     let tick_idx = self.base.state.ticks.fetch_add(1, Ordering::Relaxed);
-                    output.send(self.make_tick(tick_idx)).await?;
+                    output.send(self.make_tick(tick_idx).into()).await?;
                 }
 
                 while ctx.running().await && !self.limit_reached() {
@@ -208,7 +208,7 @@ impl Task for Timer {
                     }
 
                     let tick_idx = self.base.state.ticks.fetch_add(1, Ordering::Relaxed);
-                    output.send(self.make_tick(tick_idx)).await?;
+                    output.send(self.make_tick(tick_idx).into()).await?;
                 }
             }
 
@@ -247,7 +247,7 @@ impl Task for Timer {
                     }
 
                     let tick_idx = self.base.state.ticks.fetch_add(1, Ordering::Relaxed);
-                    output.send(self.make_tick(tick_idx)).await?;
+                    output.send(self.make_tick(tick_idx).into()).await?;
                 }
             }
         }

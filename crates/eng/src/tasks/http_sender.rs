@@ -336,17 +336,15 @@ impl Task for HttpSender {
                         .await
                         {
                             Ok(resp) => {
-                                output.send(resp).await?;
+                                output.send(resp.into()).await?;
                             }
                             Err(err_msg) => {
                                 tracing::warn!("HttpSender [{}]: {}", self.base.id, err_msg,);
                                 if let Some(ref err_out) = error_output {
-                                    err_out
-                                        .send(json!({
-                                            "error": err_msg,
-                                            "original": msg,
-                                        }))
-                                        .await?;
+                                    let mut err_obj = serde_json::Map::new();
+                                    err_obj.insert("error".to_string(), json!(err_msg));
+                                    err_obj.insert("original".to_string(), msg.into_owned());
+                                    err_out.send(Value::Object(err_obj).into()).await?;
                                 }
                             }
                         }
@@ -388,17 +386,15 @@ impl Task for HttpSender {
                                 .await
                             {
                                 Ok(resp) => {
-                                    let _ = output.send(resp).await;
+                                    let _ = output.send(resp.into()).await;
                                 }
                                 Err(err_msg) => {
                                     tracing::warn!("HttpSender [{}]: {}", task_id, err_msg,);
                                     if let Some(ref err_out) = *error_output {
-                                        let _ = err_out
-                                            .send(json!({
-                                                "error": err_msg,
-                                                "original": msg,
-                                            }))
-                                            .await;
+                                        let mut err_obj = serde_json::Map::new();
+                                        err_obj.insert("error".to_string(), json!(err_msg));
+                                        err_obj.insert("original".to_string(), msg.into_owned());
+                                        let _ = err_out.send(Value::Object(err_obj).into()).await;
                                     }
                                 }
                             }

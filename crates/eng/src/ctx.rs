@@ -5,7 +5,7 @@
 
 use crate::err::{ChannelError, EngineError, Result};
 use crate::metrics::{CoarseClock, MetricsSnapshot, TaskMetrics};
-use serde_json::Value;
+use crate::msg::Msg;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,7 @@ use tokio::task::AbortHandle;
 /// increments `messages_in` and updates `last_message_at` — zero syscalls.
 pub struct Input {
     id: String,
-    rx: mpsc::Receiver<Value>,
+    rx: mpsc::Receiver<Msg>,
     metrics: Option<Arc<TaskMetrics>>,
     clock: Option<CoarseClock>,
 }
@@ -33,7 +33,7 @@ pub struct Input {
 impl Input {
     /// Create a new input (without metrics — used in tests)
     #[cfg(test)]
-    pub(crate) fn new(id: String, rx: mpsc::Receiver<Value>) -> Self {
+    pub(crate) fn new(id: String, rx: mpsc::Receiver<Msg>) -> Self {
         Self {
             id,
             rx,
@@ -45,7 +45,7 @@ impl Input {
     /// Create a new input with metrics tracking
     pub(crate) fn with_metrics(
         id: String,
-        rx: mpsc::Receiver<Value>,
+        rx: mpsc::Receiver<Msg>,
         metrics: Arc<TaskMetrics>,
         clock: Option<CoarseClock>,
     ) -> Self {
@@ -61,8 +61,8 @@ impl Input {
     ///
     /// Blocks until a message is available or the channel is closed.
     /// Automatically updates metrics counters when configured.
-    pub async fn recv(&mut self) -> Result<Value> {
-        let val = self
+    pub async fn recv(&mut self) -> Result<Msg> {
+        let msg = self
             .rx
             .recv()
             .await
@@ -75,24 +75,24 @@ impl Input {
             }
         }
 
-        Ok(val)
+        Ok(msg)
     }
 
     /// Try to receive a message without blocking
     ///
-    /// Returns `Ok(Some(value))` if a message is available,
+    /// Returns `Ok(Some(msg))` if a message is available,
     /// `Ok(None)` if no message is available,
     /// or an error if the channel is closed.
-    pub fn try_recv(&mut self) -> Result<Option<Value>> {
+    pub fn try_recv(&mut self) -> Result<Option<Msg>> {
         match self.rx.try_recv() {
-            Ok(val) => {
+            Ok(msg) => {
                 if let Some(m) = &self.metrics {
                     m.messages_in.fetch_add(1, Ordering::Relaxed);
                     if let Some(c) = &self.clock {
                         m.last_message_at.store(c.now_millis(), Ordering::Relaxed);
                     }
                 }
-                Ok(Some(val))
+                Ok(Some(msg))
             }
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -127,14 +127,14 @@ impl std::fmt::Debug for Input {
 /// `messages_out` on success.
 pub struct Output {
     label: String,
-    handles: Vec<mpsc::Sender<Value>>,
+    handles: Vec<mpsc::Sender<Msg>>,
     metrics: Option<Arc<TaskMetrics>>,
 }
 
 impl Output {
     /// Create a new output (without metrics — used in tests)
     #[cfg(test)]
-    pub(crate) fn new(label: String, handles: Vec<mpsc::Sender<Value>>) -> Self {
+    pub(crate) fn new(label: String, handles: Vec<mpsc::Sender<Msg>>) -> Self {
         Self {
             label,
             handles,
@@ -145,7 +145,7 @@ impl Output {
     /// Create a new output with metrics tracking
     pub(crate) fn with_metrics(
         label: String,
-        handles: Vec<mpsc::Sender<Value>>,
+        handles: Vec<mpsc::Sender<Msg>>,
         metrics: Arc<TaskMetrics>,
     ) -> Self {
         Self {
@@ -157,21 +157,32 @@ impl Output {
 
     /// Send a message to all connected downstream consumers
     ///
-    /// The value is cloned for each consumer.  The call awaits until
-    /// every consumer has room in its buffer (backpressure).
-    pub async fn send(&self, value: Value) -> Result<()> {
-        if self.handles.is_empty() {
-            tracing::trace!("Output '{}' has no receivers", self.label);
-            return Ok(());
-        }
+    /// Optimised for the common case:
+    /// - Fan-out = 0: no-op
+    /// - Fan-out = 1: zero-copy (owned `Msg` forwarded directly)
+    /// - Fan-out > 1: one `Arc::new` + N cheap `Arc::clone`s
+    pub async fn send(&self, msg: Msg) -> Result<()> {
+        let err = |this: &Self| {
+            if let Some(m) = &this.metrics {
+                m.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            EngineError::Channel(ChannelError::NoReceivers(this.label.clone()))
+        };
 
-        for handle in &self.handles {
-            handle.send(value.clone()).await.map_err(|_| {
-                if let Some(m) = &self.metrics {
-                    m.errors.fetch_add(1, Ordering::Relaxed);
+        match self.handles.len() {
+            0 => {
+                tracing::trace!("Output '{}' has no receivers", self.label);
+                return Ok(());
+            }
+            1 => {
+                self.handles[0].send(msg).await.map_err(|_| err(self))?;
+            }
+            _ => {
+                let shared = msg.to_shared();
+                for handle in &self.handles {
+                    handle.send(shared.clone()).await.map_err(|_| err(self))?;
                 }
-                EngineError::Channel(ChannelError::NoReceivers(self.label.clone()))
-            })?;
+            }
         }
 
         if let Some(m) = &self.metrics {
@@ -223,10 +234,10 @@ pub struct TaskContext {
     /// Input receivers, keyed by port name.
     /// Each port can have multiple channels (channel_id, Receiver).
     /// Behind a Mutex because `mpsc::Receiver` is not Clone and must be *taken*.
-    inputs: Arc<tokio::sync::Mutex<HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>>>,
+    inputs: Arc<tokio::sync::Mutex<HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>>>,
 
     /// Output senders, keyed by label
-    outputs: Arc<HashMap<String, Vec<mpsc::Sender<Value>>>>,
+    outputs: Arc<HashMap<String, Vec<mpsc::Sender<Msg>>>>,
 
     /// Channel capacity (used when creating the merged‐input channel)
     channel_capacity: usize,
@@ -257,8 +268,8 @@ impl TaskContext {
     /// `(channel_id, Receiver)` pairs.
     pub fn new(
         id: String,
-        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
-        outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
     ) -> Self {
         Self::build(id, inputs, outputs, 1000, None)
     }
@@ -266,8 +277,8 @@ impl TaskContext {
     /// Create a new task context with explicit capacity and optional clock
     pub fn with_capacity(
         id: String,
-        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
-        outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
@@ -276,8 +287,8 @@ impl TaskContext {
 
     fn build(
         id: String,
-        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
-        outputs: HashMap<String, Vec<mpsc::Sender<Value>>>,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
@@ -327,7 +338,7 @@ impl TaskContext {
         let mut inputs = self.inputs.lock().await;
 
         // Flatten all ports into a single Vec of receivers
-        let all_receivers: Vec<(String, mpsc::Receiver<Value>)> =
+        let all_receivers: Vec<(String, mpsc::Receiver<Msg>)> =
             inputs.drain().flat_map(|(_, rxs)| rxs).collect();
 
         if all_receivers.is_empty() {
@@ -395,7 +406,7 @@ impl TaskContext {
     fn merge_receivers(
         &self,
         name: String,
-        mut receivers: Vec<(String, mpsc::Receiver<Value>)>,
+        mut receivers: Vec<(String, mpsc::Receiver<Msg>)>,
     ) -> Result<Input> {
         if receivers.is_empty() {
             return Err(EngineError::Channel(ChannelError::InputNotFound(name)));
@@ -452,7 +463,7 @@ impl TaskContext {
 
     /// Get an output channel by label
     pub fn output(&self, label: &str) -> Result<Output> {
-        let handles = self
+        let handles: Vec<mpsc::Sender<Msg>> = self
             .outputs
             .get(label)
             .ok_or_else(|| EngineError::Channel(ChannelError::OutputNotFound(label.to_string())))?
@@ -581,9 +592,9 @@ mod tests {
 
     /// Helper: create a port-keyed input map from a list of (port, channel_id, Receiver).
     fn make_inputs(
-        entries: Vec<(&str, &str, mpsc::Receiver<Value>)>,
-    ) -> HashMap<String, Vec<(String, mpsc::Receiver<Value>)>> {
-        let mut map: HashMap<String, Vec<(String, mpsc::Receiver<Value>)>> = HashMap::new();
+        entries: Vec<(&str, &str, mpsc::Receiver<Msg>)>,
+    ) -> HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>> {
+        let mut map: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>> = HashMap::new();
         for (port, ch_id, rx) in entries {
             map.entry(port.to_string())
                 .or_default()
@@ -601,7 +612,7 @@ mod tests {
         let output = Output::new("out".to_string(), vec![tx]);
 
         // Send and receive
-        output.send(json!({"test": "value"})).await.unwrap();
+        output.send(json!({"test": "value"}).into()).await.unwrap();
         let received = input.recv().await.unwrap();
 
         assert_eq!(received, json!({"test": "value"}));
@@ -626,7 +637,7 @@ mod tests {
         let (tx2, _rx2) = mpsc::channel(10);
 
         let inputs = make_inputs(vec![("in", "input1", rx1)]);
-        let mut outputs: HashMap<String, Vec<mpsc::Sender<Value>>> = HashMap::new();
+        let mut outputs: HashMap<String, Vec<mpsc::Sender<Msg>>> = HashMap::new();
         outputs.insert("out1".to_string(), vec![tx2]);
 
         let ctx = TaskContext::new("task1".to_string(), inputs, outputs);
@@ -657,10 +668,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Send messages to both input channels
-        tx1.send(json!({"source": "input1", "value": 1}))
+        tx1.send(json!({"source": "input1", "value": 1}).into())
             .await
             .unwrap();
-        tx2.send(json!({"source": "input2", "value": 2}))
+        tx2.send(json!({"source": "input2", "value": 2}).into())
             .await
             .unwrap();
 
@@ -695,8 +706,8 @@ mod tests {
         let mut merged = ctx.merged_input().await.unwrap();
         tokio::task::yield_now().await;
 
-        tx1.send(json!({"side": "left"})).await.unwrap();
-        tx2.send(json!({"side": "right"})).await.unwrap();
+        tx1.send(json!({"side": "left"}).into()).await.unwrap();
+        tx2.send(json!({"side": "right"}).into()).await.unwrap();
 
         let msg1 = merged.recv().await.unwrap();
         let msg2 = merged.recv().await.unwrap();
@@ -725,8 +736,8 @@ mod tests {
         let mut left = ctx.input("left").await.unwrap();
         let mut right = ctx.input("right").await.unwrap();
 
-        tx1.send(json!({"from": "csv"})).await.unwrap();
-        tx2.send(json!({"from": "api"})).await.unwrap();
+        tx1.send(json!({"from": "csv"}).into()).await.unwrap();
+        tx2.send(json!({"from": "api"}).into()).await.unwrap();
 
         let l = left.recv().await.unwrap();
         let r = right.recv().await.unwrap();
@@ -753,8 +764,8 @@ mod tests {
         assert!(named.contains_key("left"));
         assert!(named.contains_key("right"));
 
-        tx1.send(json!("L")).await.unwrap();
-        tx2.send(json!("R")).await.unwrap();
+        tx1.send(json!("L").into()).await.unwrap();
+        tx2.send(json!("R").into()).await.unwrap();
 
         let l = named.get_mut("left").unwrap().recv().await.unwrap();
         let r = named.get_mut("right").unwrap().recv().await.unwrap();
@@ -793,7 +804,7 @@ mod tests {
         );
 
         // Messages flow normally
-        tx1.send(json!(1)).await.unwrap();
+        tx1.send(json!(1).into()).await.unwrap();
         let msg = merged.recv().await.unwrap();
         assert_eq!(msg, json!(1));
 
@@ -804,14 +815,14 @@ mod tests {
         // After abort, trying to send still succeeds on the mpsc sender
         // but the forwarder won't forward it. merged.recv() should return
         // Err (channel closed) since the forwarder is dead.
-        let _ = tx1.send(json!(999)).await;
+        let _ = tx1.send(json!(999).into()).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // The merged channel should be closed (or at least not deliver new msgs)
         let result = merged.try_recv();
         // Either Err (closed) or Ok(None) — but NOT Ok(Some(999))
         match result {
-            Ok(Some(val)) => panic!("forwarder should be dead, but got: {val}"),
+            Ok(Some(val)) => panic!("forwarder should be dead, but got: {val:?}"),
             _ => {} // Err(Closed) or Ok(None) — both correct
         }
     }
@@ -823,13 +834,13 @@ mod tests {
         let output = Output::new("out".to_string(), vec![tx]);
 
         // Fill the buffer
-        output.send(json!(1)).await.unwrap();
-        output.send(json!(2)).await.unwrap();
+        output.send(json!(1).into()).await.unwrap();
+        output.send(json!(2).into()).await.unwrap();
 
         // The next send should block until we drain one message
         let mut input = Input::new("test".to_string(), rx);
         let send_handle = tokio::spawn(async move {
-            output.send(json!(3)).await.unwrap();
+            output.send(json!(3).into()).await.unwrap();
         });
 
         // Give the send a moment to attempt (it should be blocked)

@@ -303,7 +303,7 @@ impl Aggregator {
                 map.insert(field.clone(), json!(group_key));
             }
         }
-        output.send(result).await
+        output.send(result.into()).await
     }
 }
 

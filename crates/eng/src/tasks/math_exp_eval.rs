@@ -270,7 +270,8 @@ impl Task for MathExpEval {
 
         while ctx.running().await {
             match input.recv().await {
-                Ok(mut msg) => {
+                Ok(msg) => {
+                    let mut msg = msg.into_owned();
                     // Build eval context from message
                     match self.build_context(&msg) {
                         Ok(mut eval_ctx) => {
@@ -282,7 +283,7 @@ impl Task for MathExpEval {
                                             set(&mut msg, path, json!(value));
                                         }
                                     }
-                                    output.send(msg).await?;
+                                    output.send(msg.into()).await?;
                                     processed += 1;
                                 }
                                 Err(e) => {
@@ -294,7 +295,7 @@ impl Task for MathExpEval {
                                     );
                                     if let Some(ref err_out) = error_out {
                                         msg["_error"] = json!(e);
-                                        err_out.send(msg).await?;
+                                        err_out.send(msg.into()).await?;
                                     }
                                 }
                             }
@@ -304,7 +305,7 @@ impl Task for MathExpEval {
                             tracing::debug!("MathExpEval [{}]: context error: {}", self.base.id, e);
                             if let Some(ref err_out) = error_out {
                                 msg["_error"] = json!(e);
-                                err_out.send(msg).await?;
+                                err_out.send(msg.into()).await?;
                             }
                         }
                     }

@@ -166,7 +166,7 @@ impl Task for NumberGenerator {
             });
 
             // Send to output (async — applies backpressure)
-            output.send(data).await?;
+            output.send(data.into()).await?;
 
             // Update state
             state.generated.fetch_add(1, Ordering::Relaxed);

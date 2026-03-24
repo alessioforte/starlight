@@ -6,10 +6,10 @@ use crate::cfg::TaskConfig;
 use crate::ctx::TaskContext;
 use crate::err::{EngineError, Result, WorkflowError};
 use crate::metrics::CoarseClock;
+use crate::msg::Msg;
 use crate::task::{Command, Task, TaskInfo, TaskRunner};
 use crate::tasks::TaskRegistry;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +70,19 @@ pub struct Workflow {
 
     /// Current workflow status
     status: Arc<tokio::sync::RwLock<WorkflowStatus>>,
+
+    // -- Build info (stored for restart) --
+    /// Task configurations used to rebuild the workflow
+    task_configs: Vec<TaskConfig>,
+
+    /// Task registry for creating task instances
+    registry: TaskRegistry,
+
+    /// Channel capacity for inter-task communication
+    channel_capacity: usize,
+
+    /// Update interval for the shared coarse clock
+    clock_interval: Duration,
 }
 
 impl Workflow {
@@ -89,6 +102,8 @@ impl Workflow {
         let mut infos = Vec::new();
         for (task_id, task) in &self.task_handles {
             let mut info = task.get_info();
+            // Always set the authoritative ID from the workflow's task map
+            info.id = task_id.clone();
             // Inject live metrics from the task's context
             if let Some(ctx) = self.contexts.get(task_id) {
                 info.metrics = Some(ctx.metrics());
@@ -99,13 +114,168 @@ impl Workflow {
     }
 
     /// Start the workflow
-    pub async fn start(&self) -> Result<()> {
+    ///
+    /// If the workflow was previously stopped or failed, it is fully rebuilt
+    /// (new channels, task instances, contexts, and runners) before starting.
+    pub async fn start(&mut self) -> Result<()> {
+        {
+            let current = self.status.read().await.clone();
+            match current {
+                WorkflowStatus::Stopped | WorkflowStatus::Failed(_) => {
+                    self.spawn()?;
+                }
+                _ => {}
+            }
+        }
+
         self.cmd_tx.send(Command::Start).map_err(|e| {
             EngineError::Workflow(WorkflowError::StartFailed(self.id.clone(), e.to_string()))
         })?;
 
         let mut status = self.status.write().await;
         *status = WorkflowStatus::Running;
+        Ok(())
+    }
+
+    /// Internal: (re)create channels, task instances, contexts, and runners.
+    ///
+    /// Called by `WorkflowBuilder::build()` for the initial setup and by
+    /// `start()` when restarting a stopped/failed workflow.
+    fn spawn(&mut self) -> Result<()> {
+        // Abort any leftover handles
+        for handle in &self.handles {
+            handle.abort();
+        }
+        self.handles.clear();
+        self.task_handles.clear();
+        self.contexts.clear();
+
+        let (cmd_tx, _) = watch::channel(Command::Pause);
+        let clock = CoarseClock::start(self.clock_interval);
+
+        // 1. Map channel_id → list of consuming task IDs
+        let mut channel_consumers: HashMap<String, Vec<String>> = HashMap::new();
+        for task in &self.task_configs {
+            for (_port, channel_ids) in &task.dependencies {
+                for dep_channel_id in channel_ids {
+                    channel_consumers
+                        .entry(dep_channel_id.clone())
+                        .or_default()
+                        .push(task.id.clone());
+                }
+            }
+        }
+
+        // 1b. Build reverse map: (consumer_task_id, channel_id) → port_name
+        let mut channel_to_port: HashMap<(String, String), String> = HashMap::new();
+        for task in &self.task_configs {
+            for (port_name, channel_ids) in &task.dependencies {
+                for channel_id in channel_ids {
+                    channel_to_port
+                        .insert((task.id.clone(), channel_id.clone()), port_name.clone());
+                }
+            }
+        }
+
+        // 2. Create mpsc channels for each (channel_id, consumer) pair
+        let mut producer_senders: HashMap<String, HashMap<String, Vec<mpsc::Sender<Msg>>>> =
+            HashMap::new();
+        let mut consumer_receivers: HashMap<
+            String,
+            HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        > = HashMap::new();
+
+        for task in &self.task_configs {
+            for (label, channel_ids) in &task.outputs {
+                for channel_id in channel_ids {
+                    let consumers = channel_consumers
+                        .get(channel_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    for consumer_task_id in consumers {
+                        let (tx, rx) = mpsc::channel(self.channel_capacity);
+                        producer_senders
+                            .entry(task.id.clone())
+                            .or_default()
+                            .entry(label.clone())
+                            .or_default()
+                            .push(tx);
+
+                        let port_name = channel_to_port
+                            .get(&(consumer_task_id.clone(), channel_id.clone()))
+                            .cloned()
+                            .unwrap_or_else(|| "in".to_string());
+
+                        consumer_receivers
+                            .entry(consumer_task_id)
+                            .or_default()
+                            .entry(port_name)
+                            .or_default()
+                            .push((channel_id.clone(), rx));
+                    }
+                }
+            }
+        }
+
+        // 3. Instantiate and spawn each task
+        let mut handles = Vec::new();
+        let mut task_handles: HashMap<String, Arc<Box<dyn Task>>> = HashMap::new();
+        let mut contexts: HashMap<String, Arc<TaskContext>> = HashMap::new();
+
+        for task_config in &self.task_configs {
+            let task_instance = self
+                .registry
+                .create(&task_config.kind, task_config.id.clone(), task_config.params.clone())
+                .map_err(|e| {
+                    EngineError::Workflow(WorkflowError::InvalidConfig(
+                        self.id.clone(),
+                        format!("Failed to create task '{}': {}", task_config.id, e),
+                    ))
+                })?;
+
+            let inputs = consumer_receivers
+                .remove(&task_config.id)
+                .unwrap_or_default();
+
+            let outputs = producer_senders.remove(&task_config.id).unwrap_or_default();
+
+            let context = TaskContext::with_capacity(
+                task_config.id.clone(),
+                inputs,
+                outputs,
+                self.channel_capacity,
+                Some(clock.clone()),
+            );
+
+            let runner = TaskRunner::new(task_instance, context, cmd_tx.subscribe());
+
+            let task_handle = runner.task_handle();
+            let ctx_handle = runner.context_handle();
+            task_handles.insert(task_config.id.clone(), task_handle);
+            contexts.insert(task_config.id.clone(), ctx_handle);
+
+            handles.push(tokio::spawn(runner.run()));
+
+            tracing::debug!("Task '{}' spawned", task_config.id);
+        }
+
+        tracing::info!(
+            "Workflow '{}' spawned with {} tasks",
+            self.id,
+            handles.len()
+        );
+
+        self.cmd_tx = cmd_tx;
+        self.handles = handles;
+        self.task_handles = task_handles;
+        self.contexts = contexts;
+
+        // Reset status to Idle (ready to receive Start)
+        // Use try_write to avoid async in a sync fn — safe because no one else holds it during spawn
+        if let Ok(mut status) = self.status.try_write() {
+            *status = WorkflowStatus::Idle;
+        }
+
         Ok(())
     }
 
@@ -235,149 +405,31 @@ impl<'r> WorkflowBuilder<'r> {
 
         let (cmd_tx, _) = watch::channel(Command::Pause);
         let status = Arc::new(tokio::sync::RwLock::new(WorkflowStatus::Idle));
-        let mut task_handles: HashMap<String, Arc<Box<dyn Task>>> = HashMap::new();
 
-        // Start a shared coarse clock for all tasks in this workflow
-        let clock = CoarseClock::start(self.clock_interval);
-
-        // ---------------------------------------------------------
-        // 1. Map channel_id → list of consuming task IDs
-        // ---------------------------------------------------------
-        let mut channel_consumers: HashMap<String, Vec<String>> = HashMap::new();
-        for task in &self.tasks {
-            for (_port, channel_ids) in &task.dependencies {
-                for dep_channel_id in channel_ids {
-                    channel_consumers
-                        .entry(dep_channel_id.clone())
-                        .or_default()
-                        .push(task.id.clone());
-                }
-            }
-        }
-
-        // ---------------------------------------------------------
-        // 1b. Build reverse map: (consumer_task_id, channel_id) → port_name
-        // ---------------------------------------------------------
-        let mut channel_to_port: HashMap<(String, String), String> = HashMap::new();
-        for task in &self.tasks {
-            for (port_name, channel_ids) in &task.dependencies {
-                for channel_id in channel_ids {
-                    channel_to_port
-                        .insert((task.id.clone(), channel_id.clone()), port_name.clone());
-                }
-            }
-        }
-
-        // ---------------------------------------------------------
-        // 2. For each (channel_id, consumer) pair create one mpsc channel.
-        //    Collect senders for producers, receivers for consumers.
-        // ---------------------------------------------------------
-        // producer task id → output label → Vec<mpsc::Sender>
-        let mut producer_senders: HashMap<String, HashMap<String, Vec<mpsc::Sender<Value>>>> =
-            HashMap::new();
-        // consumer task id → port_name → Vec<(channel_id, mpsc::Receiver)>
-        let mut consumer_receivers: HashMap<
-            String,
-            HashMap<String, Vec<(String, mpsc::Receiver<Value>)>>,
-        > = HashMap::new();
-
-        for task in &self.tasks {
-            for (label, channel_ids) in &task.outputs {
-                for channel_id in channel_ids {
-                    let consumers = channel_consumers
-                        .get(channel_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    for consumer_task_id in consumers {
-                        let (tx, rx) = mpsc::channel(self.channel_capacity);
-                        producer_senders
-                            .entry(task.id.clone())
-                            .or_default()
-                            .entry(label.clone())
-                            .or_default()
-                            .push(tx);
-
-                        let port_name = channel_to_port
-                            .get(&(consumer_task_id.clone(), channel_id.clone()))
-                            .cloned()
-                            .unwrap_or_else(|| "in".to_string());
-
-                        consumer_receivers
-                            .entry(consumer_task_id)
-                            .or_default()
-                            .entry(port_name)
-                            .or_default()
-                            .push((channel_id.clone(), rx));
-                    }
-                }
-            }
-        }
-
-        // ---------------------------------------------------------
-        // 3. Instantiate and spawn each task
-        // ---------------------------------------------------------
-        let mut handles = Vec::new();
-        let mut contexts: HashMap<String, Arc<TaskContext>> = HashMap::new();
-
-        for task_config in self.tasks {
-            // Use the registry to create the task instance
-            let task_instance = self
-                .registry
-                .create(
-                    &task_config.kind,
-                    task_config.id.clone(),
-                    task_config.params,
-                )
-                .map_err(|e| {
-                    EngineError::Workflow(WorkflowError::InvalidConfig(
-                        self.id.clone(),
-                        format!("Failed to create task '{}': {}", task_config.id, e),
-                    ))
-                })?;
-
-            // Inputs: port-keyed receivers for this task
-            let inputs = consumer_receivers
-                .remove(&task_config.id)
-                .unwrap_or_default();
-
-            // Outputs: senders from this task
-            let outputs = producer_senders.remove(&task_config.id).unwrap_or_default();
-
-            // Create task context with the configured channel capacity and shared clock
-            let context = TaskContext::with_capacity(
-                task_config.id.clone(),
-                inputs,
-                outputs,
-                self.channel_capacity,
-                Some(clock.clone()),
-            );
-
-            // Create task runner
-            let runner = TaskRunner::new(task_instance, context, cmd_tx.subscribe());
-
-            let task_handle = runner.task_handle();
-            let ctx_handle = runner.context_handle();
-            task_handles.insert(task_config.id.clone(), task_handle);
-            contexts.insert(task_config.id.clone(), ctx_handle);
-
-            // Spawn the task
-            handles.push(tokio::spawn(runner.run()));
-
-            tracing::debug!("Task '{}' spawned", task_config.id);
-        }
-
-        tracing::info!("Workflow '{}' built with {} tasks", self.id, handles.len());
-
-        Ok(Workflow {
+        let mut workflow = Workflow {
             id: self.id,
             name: self.name,
             description: self.description,
             cmd_tx,
-            task_handles,
-            contexts,
-            handles,
+            handles: Vec::new(),
+            task_handles: HashMap::new(),
+            contexts: HashMap::new(),
             status,
-        })
+            task_configs: self.tasks,
+            registry: self.registry.clone(),
+            channel_capacity: self.channel_capacity,
+            clock_interval: self.clock_interval,
+        };
+
+        workflow.spawn()?;
+
+        tracing::info!(
+            "Workflow '{}' built with {} tasks",
+            workflow.id,
+            workflow.handles.len()
+        );
+
+        Ok(workflow)
     }
 
     /// Validate the workflow configuration
@@ -516,6 +568,7 @@ impl<'r> WorkflowBuilder<'r> {
 mod tests {
     use super::*;
     use crate::cfg::TaskConfig;
+    use serde_json::Value;
 
     fn registry() -> TaskRegistry {
         TaskRegistry::with_builtins()
@@ -599,5 +652,34 @@ mod tests {
             .build();
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_stop_and_restart() {
+        let r = registry();
+        let mut wf = WorkflowBuilder::new("restart_test", &r)
+            .name("Restart Test")
+            .add_task(TaskConfig::new("task1", "dummy", serde_json::json!({})))
+            .build()
+            .unwrap();
+
+        // First start
+        wf.start().await.unwrap();
+        assert_eq!(*wf.status.read().await, WorkflowStatus::Running);
+
+        // Stop
+        wf.stop().await.unwrap();
+        assert_eq!(*wf.status.read().await, WorkflowStatus::Stopped);
+
+        // Wait a bit for runners to shut down
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Restart — should rebuild and start successfully
+        wf.start().await.unwrap();
+        assert_eq!(*wf.status.read().await, WorkflowStatus::Running);
+
+        // Stop again to clean up
+        wf.stop().await.unwrap();
+        assert_eq!(*wf.status.read().await, WorkflowStatus::Stopped);
     }
 }

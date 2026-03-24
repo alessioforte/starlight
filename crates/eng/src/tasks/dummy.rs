@@ -73,7 +73,7 @@ impl Task for Dummy {
 
         // Send a single "done" message if an output is configured
         if let Ok(output) = ctx.output("out") {
-            output.send(json!({"status": "done"})).await?;
+            output.send(json!({"status": "done"}).into()).await?;
         }
 
         tracing::info!("Dummy task {} completed", self.base.id);

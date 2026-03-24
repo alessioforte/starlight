@@ -295,13 +295,9 @@ impl Task for SimulatorTask {
                 field: value,
             });
 
-            output.send(msg).await?;
+            output.send(msg.into()).await?;
 
             tokio::time::sleep(interval).await;
-
-            if !ctx.is_running() || self.limit_reached() {
-                break;
-            }
         }
 
         let total = self.state.ticks.load(Ordering::Relaxed);
