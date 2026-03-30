@@ -94,6 +94,9 @@ enum Commands {
         #[arg(short, long, default_value = "yaml")]
         output: Option<String>,
     },
+
+    /// Generate a workflow interactively with AI
+    Generate,
 }
 
 #[derive(Parser)]
@@ -157,6 +160,7 @@ impl Cli {
             Commands::Stop { id } => cmd::stop_workflow(&id).await,
             Commands::Remove { id } => cmd::remove_workflow(&id).await,
             Commands::State { id } => cmd::get_workflow_state(&id).await,
+            Commands::Generate => cmd::generate().await,
             _ => {
                 eprintln!("Unknown command");
                 Err(anyhow::anyhow!("Unknown command"))

@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod cmd;
 mod ctx;
+mod tui;
 
 use clap::Parser;
 use cli::Cli;

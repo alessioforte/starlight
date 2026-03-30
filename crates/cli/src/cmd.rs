@@ -1,5 +1,6 @@
 use crate::api;
 use crate::ctx;
+use crate::tui;
 use tabled::{Table, Tabled, settings::Style};
 
 #[derive(Tabled, Clone, Debug)]
@@ -148,6 +149,10 @@ pub async fn list_contexts() -> Result<(), anyhow::Error> {
             Err(anyhow::anyhow!("Failed to list contexts"))
         }
     }
+}
+
+pub async fn generate() -> Result<(), anyhow::Error> {
+    tui::run().await
 }
 
 pub async fn get_workflow(id: &str, output: Option<String>) -> Result<(), anyhow::Error> {

@@ -90,3 +90,36 @@ pub async fn send_command(id: &str, command: &str) -> Result<(), reqwest::Error>
         .await;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Generate (AI workflow generation)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GenerateResponse {
+    pub status: String,
+    pub message: Option<String>,
+    pub config: Option<eng::Config>,
+    pub messages: Vec<ChatMessage>,
+}
+
+pub async fn generate_workflow(
+    prompt: Option<&str>,
+    messages: Option<&[ChatMessage]>,
+) -> Result<GenerateResponse, reqwest::Error> {
+    let body = match (prompt, messages) {
+        (Some(p), None) => serde_json::json!({ "prompt": p }),
+        (None, Some(msgs)) => serde_json::json!({ "messages": msgs }),
+        _ => serde_json::json!({}),
+    };
+    let res = Request::new(Method::POST, "workflows/generate")
+        .send_json(body)
+        .await?;
+    res.json().await
+}

@@ -1,3 +1,4 @@
+mod generate;
 mod health;
 mod workflows;
 
@@ -7,4 +8,5 @@ pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/health", axum::routing::get(health::health))
         .merge(workflows::routes())
+        .merge(generate::routes())
 }

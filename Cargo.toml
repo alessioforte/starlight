@@ -10,11 +10,10 @@ license = "" # TODO: add license
 [workspace]
 members = [
     "crates/cli",
-    "crates/engine",
+    "crates/eng",
     "crates/jb",
-    "crates/simulator",
-    "crates/simple_engine"
-, "crates/eng"]
+    "crates/simulator"
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,7 +35,7 @@ axum = "0.8.4"
 console-subscriber = "0.4.1"
 dotenvy = "0.15.7"
 eng = { path = "crates/eng" }
-engine = { path = "crates/engine" }
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["preserve_order"] }
 serde_yaml_bw = "2.4.0"
