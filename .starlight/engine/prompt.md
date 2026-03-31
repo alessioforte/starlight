@@ -51,7 +51,17 @@ A workflow config is a JSON object with the following structure:
 - math_exp_eval: vars({name: "field.path"}), consts({name: value}), expressions({name: "expr"}), mapping({name: "output.path"})
 - aggregator: columns([{field,fn(count|sum|avg|min|max|collect),alias(opt)}]), window_count(int,opt), window_ms(int,opt), group_by(string,opt)
 - http_sender: url(string), method(GET|POST|PUT|PATCH|DELETE), headers(map,opt), timeout_ms(int,default:30000)
-- dummy: {} (no params)
+- simulator: models([ModelConfig], see below), interval_ms(int,default:1000), step_ms(int,opt), count(int,opt), field(string,default:"value")
+
+**simulator ModelConfig** — each entry in `models` is one of:
+- `{"type":"sine", "amplitude":float, "frequency":float, "phase":float(default:0)}`
+- `{"type":"random", "mean":float(default:0), "stddev":float(default:1), "seed":int(opt)}`
+- `{"type":"random_walk", "start":float(default:0), "drift":float(default:0), "volatility":float(default:1), "seed":int(opt)}`
+- `{"type":"trend", "kind":"linear", "slope":float, "intercept":float}`
+- `{"type":"trend", "kind":"exponential", "initial":float(default:1), "rate":float}`
+- `{"type":"anomaly", "base":ModelConfig, "probability":float(default:0.05), "min_magnitude":float(default:5), "max_magnitude":float(default:10), "bidirectional":bool(default:false), "seed":int(opt)}`
+
+Multiple models are composed: their outputs are **summed** at each tick. Output message: `{tick, time_ms, <field>: value}`
 
 ## Examples
 
@@ -80,6 +90,46 @@ A workflow config is a JSON object with the following structure:
       "type": "logger",
       "dependencies": ["number_generator_out"],
       "params": {},
+      "outputs": {}
+    }
+  ]
+}
+```
+
+### Simulator with sine wave and noise, write to CSV
+
+```json
+{
+  "id": "sim_csv",
+  "name": "Sine wave simulator to CSV",
+  "description": "Simulates a sine wave with random noise and writes to CSV",
+  "tasks": [
+    {
+      "id": "sim",
+      "type": "simulator",
+      "dependencies": [],
+      "params": {
+        "models": [
+          {"type": "sine", "amplitude": 10, "frequency": 0.1},
+          {"type": "random", "mean": 0, "stddev": 0.5, "seed": 42}
+        ],
+        "interval_ms": 500,
+        "count": 100,
+        "field": "temperature"
+      },
+      "outputs": {
+        "out": ["sim_out"]
+      }
+    },
+    {
+      "id": "writer",
+      "type": "csv_writer",
+      "dependencies": ["sim_out"],
+      "params": {
+        "filename": "/tmp/simulation.csv",
+        "write_mode": "overwrite",
+        "flush_every": 10
+      },
       "outputs": {}
     }
   ]

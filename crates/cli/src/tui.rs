@@ -34,6 +34,8 @@ struct DisplayMessage {
 // App state
 // ---------------------------------------------------------------------------
 
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 struct App {
     messages: Vec<DisplayMessage>,
     conversation: Vec<ChatMessage>,
@@ -42,6 +44,7 @@ struct App {
     scroll_offset: u16,
     total_lines: u16,
     loading: bool,
+    spinner_frame: usize,
     should_quit: bool,
 }
 
@@ -59,6 +62,7 @@ impl App {
             scroll_offset: 0,
             total_lines: 0,
             loading: false,
+            spinner_frame: 0,
             should_quit: false,
         }
     }
@@ -181,9 +185,11 @@ fn render_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
         let line_width: usize = line.spans.iter().map(|s| s.content.len()).sum();
         if line_width <= width as usize {
             let mut spans = vec![Span::raw(" ")];
-            spans.extend(line.spans.into_iter().map(|s| {
-                Span::styled(s.content.into_owned(), convert_style(s.style))
-            }));
+            spans.extend(
+                line.spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.into_owned(), convert_style(s.style))),
+            );
             lines.push(Line::from(spans));
         } else {
             let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -199,39 +205,41 @@ fn render_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
 
 fn build_chat_lines(messages: &[DisplayMessage], width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let content_width = (width as usize).saturating_sub(2);
+    // "❯ " or "⏺ " prefix is 2 chars; content indented by 2 on continuation lines
+    let prefix_width: usize = 2;
+    let content_width = (width as usize).saturating_sub(prefix_width);
 
     for msg in messages {
-        // Role label with dimmed separator
-        let (label, label_color) = match msg.role {
-            Role::User => ("You", Color::Cyan),
-            Role::Assistant => ("AI", Color::Green),
+        let (icon, icon_color) = match msg.role {
+            Role::User => ("\u{276F}", Color::Cyan),
+            Role::Assistant => ("⏺", Color::Green),
+        };
+        let icon_style = Style::default().fg(icon_color).add_modifier(Modifier::BOLD);
+        let indent = " ".repeat(prefix_width);
+
+        // Render content lines — first line gets the icon prefix, rest get plain indent
+        let content_lines: Vec<Line<'static>> = match msg.role {
+            Role::User => render_plain_lines(
+                &msg.content,
+                content_width,
+                Style::default().fg(Color::White),
+            ),
+            Role::Assistant => {
+                render_markdown_lines(&msg.content, width.saturating_sub(prefix_width as u16))
+            }
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{label} "),
-                Style::default()
-                    .fg(label_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "\u{2500}".repeat(content_width.saturating_sub(label.len() + 1).min(40)),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-
-        // Content — markdown for assistant, plain for user
-        match msg.role {
-            Role::User => {
-                lines.extend(render_plain_lines(
-                    &msg.content,
-                    content_width,
-                    Style::default().fg(Color::White),
-                ));
-            }
-            Role::Assistant => {
-                lines.extend(render_markdown_lines(&msg.content, width.saturating_sub(2)));
+        for (i, line) in content_lines.into_iter().enumerate() {
+            if i == 0 {
+                // Prepend icon to the first span of the first line
+                let mut spans = vec![Span::styled(format!("{icon} "), icon_style)];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            } else {
+                // Continuation lines: replace leading space with plain indent
+                let mut spans = vec![Span::raw(indent.clone())];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
             }
         }
 
@@ -256,24 +264,43 @@ fn build_chat_lines(messages: &[DisplayMessage], width: u16) -> Vec<Line<'static
     lines
 }
 
+/// Number of display rows the input text occupies given available width.
+/// The caret "❯ " prefix takes 2 chars; continuation lines also indent by 2.
+fn input_row_count(input: &str, available_width: u16) -> u16 {
+    let text_width = (available_width as usize).saturating_sub(2).max(1);
+    if input.is_empty() {
+        return 1;
+    }
+    let chars = input.chars().count();
+    ((chars + text_width - 1) / text_width) as u16
+}
+
 fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Horizontal padding
     let padded = Layout::horizontal([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(area);
     let inner = padded[1];
 
+    // Compute dynamic input height (min 1, grows with content)
+    let input_rows = if app.loading {
+        1
+    } else {
+        input_row_count(&app.input, inner.width).max(1)
+    };
+
     let chunks = Layout::vertical([
-        Constraint::Length(2), // header
-        Constraint::Min(1),   // chat
-        Constraint::Length(1), // separator
-        Constraint::Length(1), // input
-        Constraint::Length(1), // help
+        Constraint::Length(2),          // header
+        Constraint::Min(1),             // chat
+        Constraint::Length(1),          // separator
+        Constraint::Length(input_rows), // input (dynamic)
+        Constraint::Length(1),          // spacer
+        Constraint::Length(1),          // help
     ])
     .split(inner);
 
@@ -281,20 +308,17 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let chat_area = chunks[1];
     let sep_area = chunks[2];
     let input_area = chunks[3];
-    let help_area = chunks[4];
+    let help_area = chunks[5];
 
     // Header
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            " starlight ",
+            "starlight ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "workflow generator",
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled("workflow generator", Style::default().fg(Color::DarkGray)),
     ]));
     frame.render_widget(header, header_area);
 
@@ -302,19 +326,26 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let mut chat_lines = build_chat_lines(&app.messages, chat_area.width);
 
     if app.loading {
-        chat_lines.push(Line::from(Span::styled(
-            " Thinking...",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::ITALIC),
-        )));
+        chat_lines.push(Line::from(vec![
+            Span::styled(
+                "⏺ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Thinking...",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
         chat_lines.push(Line::from(""));
     }
 
     app.total_lines = chat_lines.len() as u16;
     let visible_height = chat_area.height;
 
-    // Auto-scroll to bottom
     let max_scroll = app.total_lines.saturating_sub(visible_height);
     if app.scroll_offset > max_scroll {
         app.scroll_offset = max_scroll;
@@ -323,10 +354,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
     let chat = Paragraph::new(Text::from(chat_lines)).scroll((app.scroll_offset, 0));
     frame.render_widget(chat, chat_area);
 
-    // Scrollbar (thin, right edge)
+    // Scrollbar
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_style(Style::default().fg(Color::DarkGray))
-        .track_style(Style::default().fg(Color::Rgb(40, 40, 40)));
+        .thumb_style(Style::default().fg(Color::Rgb(50, 50, 50)))
+        .begin_style(Style::default().fg(Color::Rgb(30, 30, 30)))
+        .end_style(Style::default().fg(Color::Rgb(30, 30, 30)))
+        .track_style(Style::default().fg(Color::Rgb(30, 30, 30)));
     let mut scrollbar_state = ScrollbarState::new(app.total_lines as usize)
         .position(app.scroll_offset as usize)
         .viewport_content_length(visible_height as usize);
@@ -341,52 +374,74 @@ fn draw(frame: &mut Frame, app: &mut App) {
 
     // Separator line
     let sep_line = "\u{2500}".repeat(sep_area.width as usize);
-    let sep = Paragraph::new(Span::styled(
-        sep_line,
-        Style::default().fg(Color::Rgb(60, 60, 60)),
-    ));
-    frame.render_widget(sep, sep_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            sep_line,
+            Style::default().fg(Color::Rgb(60, 60, 60)),
+        )),
+        sep_area,
+    );
 
-    // Input line with caret
-    let (caret, caret_style) = if app.loading {
-        ("\u{2026} ", Style::default().fg(Color::DarkGray))
+    // Input — multiline paragraph with ❯ prefix on first line, spaces on continuation
+    let text_width = (input_area.width as usize).saturating_sub(2).max(1);
+    if app.loading {
+        let spinner = SPINNER[app.spinner_frame % SPINNER.len()];
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("{spinner} "),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("Waiting for response...", Style::default().fg(Color::DarkGray)),
+            ])),
+            input_area,
+        );
     } else {
-        ("\u{276F} ", Style::default().fg(Color::Cyan))
-    };
-    let input_text = if app.loading {
-        "Waiting for response...".to_string()
-    } else {
-        app.input.clone()
-    };
-    let input_style = if app.loading {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled(caret, caret_style),
-        Span::styled(input_text, input_style),
-    ]));
-    frame.render_widget(input, input_area);
+        let caret_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(Color::White);
+        let input_chars: Vec<char> = app.input.chars().collect();
+        let mut input_lines: Vec<Line<'static>> = Vec::new();
 
-    // Cursor position (after the caret "❯ ")
-    if !app.loading {
-        frame.set_cursor_position((
-            input_area.x + 2 + app.cursor_pos as u16,
-            input_area.y,
-        ));
+        if input_chars.is_empty() {
+            input_lines.push(Line::from(Span::styled("\u{276F} ", caret_style)));
+        } else {
+            for (i, chunk) in input_chars.chunks(text_width).enumerate() {
+                let s: String = chunk.iter().collect();
+                if i == 0 {
+                    input_lines.push(Line::from(vec![
+                        Span::styled("\u{276F} ", caret_style),
+                        Span::styled(s, text_style),
+                    ]));
+                } else {
+                    input_lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(s, text_style),
+                    ]));
+                }
+            }
+        }
+
+        frame.render_widget(Paragraph::new(Text::from(input_lines)), input_area);
+
+        // Cursor: map char offset to row/col within the input area
+        let cursor_char = app.cursor_pos.min(input_chars.len());
+        let cursor_row = (cursor_char / text_width) as u16;
+        let cursor_col = (cursor_char % text_width) as u16;
+        frame.set_cursor_position((input_area.x + 2 + cursor_col, input_area.y + cursor_row));
     }
 
     // Help bar
     let help = Paragraph::new(Line::from(vec![
         Span::styled("enter", Style::default().fg(Color::DarkGray)),
-        Span::styled(" send ", Style::default().fg(Color::Rgb(80, 80, 80))),
+        Span::styled(" send  ", Style::default().fg(Color::Rgb(60, 60, 60))),
         Span::styled("esc", Style::default().fg(Color::DarkGray)),
-        Span::styled(" quit ", Style::default().fg(Color::Rgb(80, 80, 80))),
+        Span::styled(" quit  ", Style::default().fg(Color::Rgb(60, 60, 60))),
         Span::styled("ctrl+s", Style::default().fg(Color::DarkGray)),
-        Span::styled(" save ", Style::default().fg(Color::Rgb(80, 80, 80))),
-        Span::styled("\u{2191}/\u{2193}", Style::default().fg(Color::DarkGray)),
-        Span::styled(" scroll", Style::default().fg(Color::Rgb(80, 80, 80))),
+        Span::styled(" save  ", Style::default().fg(Color::Rgb(60, 60, 60))),
+        Span::styled("\u{2191}\u{2193}", Style::default().fg(Color::DarkGray)),
+        Span::styled(" scroll", Style::default().fg(Color::Rgb(60, 60, 60))),
     ]));
     frame.render_widget(help, help_area);
 }
@@ -441,8 +496,13 @@ async fn run_inner() -> anyhow::Result<()> {
             }
         }
 
+        // Advance spinner on each tick while loading
+        if app.loading {
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+        }
+
         // Poll events with a short timeout so we can check the channel
-        if event::poll(std::time::Duration::from_millis(50))? {
+        if event::poll(std::time::Duration::from_millis(80))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
