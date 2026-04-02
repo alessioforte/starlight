@@ -225,7 +225,11 @@ impl Workflow {
         for task_config in &self.task_configs {
             let task_instance = self
                 .registry
-                .create(&task_config.kind, task_config.id.clone(), task_config.params.clone())
+                .create(
+                    &task_config.kind,
+                    task_config.id.clone(),
+                    task_config.params.clone(),
+                )
                 .map_err(|e| {
                     EngineError::Workflow(WorkflowError::InvalidConfig(
                         self.id.clone(),

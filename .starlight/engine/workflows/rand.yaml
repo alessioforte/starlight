@@ -1,21 +1,21 @@
 id: rand
 name: Random number generator and logger
-description: >-
-  A workflow that generates random numbers and logs them to the console.
+description: A workflow that generates random numbers and logs them to the console.
+channel_buffer_size: null
 tasks:
-  - id: number_generator
-    type: number_generator
-    dependencies: []
-    params:
-      min: 1
-      max: 100
-    outputs:
-      out:
-        - number_generator_out
-
-  - id: logger
-    type: logger
-    dependencies:
-      - number_generator_out
-    params: {}
-    outputs: {}
+- id: number_generator
+  type: number_generator
+  params:
+    min: 1
+    max: 100
+  dependencies: {}
+  outputs:
+    out:
+    - number_generator_out
+- id: logger
+  type: logger
+  params: {}
+  dependencies:
+    in:
+    - number_generator_out
+  outputs: {}

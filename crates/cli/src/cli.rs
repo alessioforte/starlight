@@ -50,20 +50,42 @@ enum Commands {
     #[command(name = "engine", subcommand_help_heading = "Engine Commands")]
     Engine(EngineCli),
 
-    /// Load a single workflow file or a directory
+    /// Push a workflow file to the engine directory
     Push {
-        #[arg(short, long)]
-        file: Option<String>,
-
-        #[arg(short, long)]
-        dir: Option<String>,
+        /// Path to a workflow file (.yaml or .json)
+        file: String,
     },
 
-    /// List all loaded workflows
-    #[clap(alias = "ls")]
-    List,
+    /// Pull a workflow config from the engine directory and save to file
+    Pull {
+        /// Workflow ID
+        id: String,
+        /// Output format: yaml or json
+        #[arg(short, long, default_value = "yaml")]
+        output: Option<String>,
+    },
 
-    /// Run a workflow
+    /// List workflows (loaded in engine by default, or all files with --all)
+    #[clap(alias = "ls")]
+    List {
+        /// List all workflow files (including unloaded)
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    /// Mount (load) a workflow from the filesystem into the engine
+    Mount {
+        /// Workflow ID
+        id: String,
+    },
+
+    /// Unmount (unload) a workflow from the engine without deleting the file
+    Unmount {
+        /// Workflow ID
+        id: String,
+    },
+
+    /// Mount and start a workflow
     Run { id: String },
 
     /// Start a workflow
@@ -75,25 +97,12 @@ enum Commands {
     /// Stop a workflow
     Stop { id: String },
 
-    /// Delete a workflow
+    /// Delete a workflow from engine and filesystem
     #[clap(alias = "rm")]
     Remove { id: String },
-    /// Show status of a workflow or all
-    Status { id: Option<String> },
 
     /// Get the state of a workflow
     State { id: String },
-
-    /// Describe a workflow
-    Describe { id: String },
-
-    /// Get details of a workflow
-    Get {
-        id: String,
-        /// Output format, e.g., yaml, json
-        #[arg(short, long, default_value = "yaml")]
-        output: Option<String>,
-    },
 
     /// Generate a workflow interactively with AI
     Generate,
@@ -112,17 +121,14 @@ impl Cli {
             // Engine
             Commands::Engine(engine_cli) => match engine_cli.command {
                 EngineCommands::Start => {
-                    // Handle engine start command
                     println!("Starting the engine...");
                     Ok(())
                 }
                 EngineCommands::Stop => {
-                    // Handle engine stop command
                     println!("Stopping the engine...");
                     Ok(())
                 }
                 EngineCommands::Status => {
-                    // Handle engine status command
                     println!("Checking engine status...");
                     Ok(())
                 }
@@ -132,39 +138,36 @@ impl Cli {
             Commands::Config(config_cli) => match config_cli.command {
                 ConfigCommands::GetContext { current } => {
                     if current {
-                        // Get the current context
                         println!("Getting current context...");
-                        // Here you would implement the logic to get the current context
                         Ok(())
                     } else {
-                        // Get all contexts
                         println!("Getting all contexts...");
-                        // Here you would implement the logic to get all contexts
                         Ok(())
                     }
                 }
-                ConfigCommands::SetContext { name } => {
-                    // Set the current context by name
-                    println!("Setting context to {}", name);
-                    // Here you would implement the logic to set the context
-                    Ok(())
-                }
+                ConfigCommands::SetContext { name } => cmd::set_context(&name).await,
                 ConfigCommands::GetContexts => cmd::list_contexts().await,
             },
 
-            Commands::List => cmd::list_workflows().await,
-            Commands::Get { id, output } => cmd::get_workflow(&id, output).await,
-            Commands::Run { id } => cmd::start_workflow(&id).await,
+            // Workflow commands
+            Commands::Push { file } => cmd::push_workflow(&file).await,
+            Commands::Pull { id, output } => cmd::pull_workflow(&id, output).await,
+            Commands::List { all } => {
+                if all {
+                    cmd::list_all_workflows().await
+                } else {
+                    cmd::list_workflows().await
+                }
+            }
+            Commands::Mount { id } => cmd::mount_workflow(&id).await,
+            Commands::Unmount { id } => cmd::unmount_workflow(&id).await,
+            Commands::Run { id } => cmd::run_workflow(&id).await,
             Commands::Start { id } => cmd::start_workflow(&id).await,
             Commands::Pause { id } => cmd::pause_workflow(&id).await,
             Commands::Stop { id } => cmd::stop_workflow(&id).await,
             Commands::Remove { id } => cmd::remove_workflow(&id).await,
             Commands::State { id } => cmd::get_workflow_state(&id).await,
             Commands::Generate => cmd::generate().await,
-            _ => {
-                eprintln!("Unknown command");
-                Err(anyhow::anyhow!("Unknown command"))
-            }
         }
     }
 }

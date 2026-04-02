@@ -1,4 +1,3 @@
-mod act;
 mod api;
 mod etc;
 mod tasks;
@@ -6,7 +5,6 @@ mod tasks;
 use crate::etc::cfg::AppState;
 use axum::Router;
 use dotenvy::dotenv;
-// use engine::Engine;
 use eng::Engine;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,8 +23,6 @@ async fn main() {
     let mut engine = Engine::new();
     engine.register_task("simulator", tasks::simulator::SimulatorTask::create);
     let engine = Arc::new(Mutex::new(engine));
-
-    act::load_workflow_from_dir(&engine).await;
 
     let app = Router::new().merge(api::routes()).with_state(AppState {
         engine: engine.clone(),

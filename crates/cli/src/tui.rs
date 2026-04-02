@@ -390,9 +390,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!("{spinner} "),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Waiting for response...", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Waiting for response...",
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])),
             input_area,
         );

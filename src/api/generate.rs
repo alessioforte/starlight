@@ -123,9 +123,8 @@ fn prompt_file_path() -> PathBuf {
 }
 
 fn build_system_prompt(task_types: &[&str]) -> Result<String, GenerateError> {
-    let reference = std::fs::read_to_string(prompt_file_path()).map_err(|e| {
-        GenerateError::PromptFile(format!("{}: {e}", prompt_file_path().display()))
-    })?;
+    let reference = std::fs::read_to_string(prompt_file_path())
+        .map_err(|e| GenerateError::PromptFile(format!("{}: {e}", prompt_file_path().display())))?;
 
     Ok(format!(
         r#"You are a workflow generator for the Starlight engine.
@@ -197,9 +196,7 @@ async fn call_llm(
     json["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            GenerateError::LlmResponse(format!("unexpected response format: {json}"))
-        })
+        .ok_or_else(|| GenerateError::LlmResponse(format!("unexpected response format: {json}")))
 }
 
 // ---------------------------------------------------------------------------

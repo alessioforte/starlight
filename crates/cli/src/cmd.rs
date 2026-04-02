@@ -21,11 +21,15 @@ fn display_bool(value: &bool) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workflow commands
+// ---------------------------------------------------------------------------
+
 pub async fn list_workflows() -> Result<(), anyhow::Error> {
     match api::get_workflows().await {
         Ok(workflows) => {
             if workflows.is_empty() {
-                println!("No workflows found.");
+                println!("No workflows loaded.");
                 return Ok(());
             }
             let mut table = Table::new(workflows);
@@ -40,31 +44,139 @@ pub async fn list_workflows() -> Result<(), anyhow::Error> {
     }
 }
 
-// pub async fn run_workflow(id: &str) -> Result<(), anyhow::Error> {
-//     match api::load_workflow(id).await {
-//         Ok(_) => match api::send_command(id, "execute").await {
-//             Ok(_) => Ok(()),
-//             Err(e) => {
-//                 eprintln!("Error executing workflow {}: {}", id, e);
-//                 Err(anyhow::anyhow!("Failed to execute workflow"))
-//             }
-//         },
-//         Err(e) => {
-//             eprintln!("Error running workflow {}: {}", id, e);
-//             Err(anyhow::anyhow!("Failed to run workflow"))
-//         }
-//     }
-// }
+pub async fn list_all_workflows() -> Result<(), anyhow::Error> {
+    match api::list_workflow_files().await {
+        Ok(files) => {
+            if files.is_empty() {
+                println!("No workflow files found.");
+                return Ok(());
+            }
+            let mut table = Table::new(files);
+            table.with(Style::blank());
+            println!("{}", table);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error listing workflow files: {}", e);
+            Err(anyhow::anyhow!("Failed to list workflow files"))
+        }
+    }
+}
 
-// pub async fn load_workflow(id: &str) -> Result<(), anyhow::Error> {
-//     match api::load_workflow(id).await {
-//         Ok(_) => Ok(()),
-//         Err(e) => {
-//             eprintln!("Error loading workflow {}: {}", id, e);
-//             Err(anyhow::anyhow!("Failed to load workflow"))
-//         }
-//     }
-// }
+pub async fn push_workflow(file: &str) -> Result<(), anyhow::Error> {
+    let path = std::path::Path::new(file);
+    if !path.exists() {
+        return Err(anyhow::anyhow!("File not found: {}", file));
+    }
+
+    let f = std::fs::File::open(path)?;
+    let config: eng::Config = match path.extension().and_then(|e| e.to_str()) {
+        Some("json") => serde_json::from_reader(f)?,
+        Some("yaml" | "yml") => serde_yaml_bw::from_reader(f)?,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unsupported file format. Use .json or .yaml"
+            ));
+        }
+    };
+
+    match api::push_workflow_file(config).await {
+        Ok(res) => {
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error pushing workflow: {}", e);
+            Err(anyhow::anyhow!("Failed to push workflow"))
+        }
+    }
+}
+
+pub async fn pull_workflow(id: &str, output: Option<String>) -> Result<(), anyhow::Error> {
+    match api::get_workflow_file(id).await {
+        Ok(config) => {
+            let format = output.as_deref().unwrap_or("yaml");
+            match format {
+                "json" => {
+                    let content = serde_json::to_string_pretty(&config)?;
+                    let filename = format!("{}.json", id);
+                    std::fs::write(&filename, &content)?;
+                    println!("Saved to {}", filename);
+                }
+                "yaml" | "yml" => {
+                    let content = serde_yaml_bw::to_string(&config)?;
+                    let filename = format!("{}.yaml", id);
+                    std::fs::write(&filename, &content)?;
+                    println!("Saved to {}", filename);
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Unsupported format. Use 'json' or 'yaml'."));
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error pulling workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to pull workflow"))
+        }
+    }
+}
+
+pub async fn mount_workflow(id: &str) -> Result<(), anyhow::Error> {
+    match api::mount_workflow(id).await {
+        Ok(res) => {
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error mounting workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to mount workflow"))
+        }
+    }
+}
+
+pub async fn unmount_workflow(id: &str) -> Result<(), anyhow::Error> {
+    match api::unmount_workflow(id).await {
+        Ok(res) => {
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error unmounting workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to unmount workflow"))
+        }
+    }
+}
+
+pub async fn remove_workflow(id: &str) -> Result<(), anyhow::Error> {
+    match api::delete_workflow_file(id).await {
+        Ok(res) => {
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Error removing workflow {}: {}", id, e);
+            Err(anyhow::anyhow!("Failed to remove workflow"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine control
+// ---------------------------------------------------------------------------
+
+pub async fn run_workflow(id: &str) -> Result<(), anyhow::Error> {
+    api::mount_workflow(id).await.map_err(|e| {
+        eprintln!("Error mounting workflow {}: {}", id, e);
+        anyhow::anyhow!("Failed to mount workflow")
+    })?;
+    api::send_command(id, "start").await.map_err(|e| {
+        eprintln!("Error starting workflow {}: {}", id, e);
+        anyhow::anyhow!("Failed to start workflow")
+    })?;
+    println!("Workflow {} is running.", id);
+    Ok(())
+}
 
 pub async fn start_workflow(id: &str) -> Result<(), anyhow::Error> {
     match api::send_command(id, "start").await {
@@ -109,15 +221,9 @@ pub async fn get_workflow_state(id: &str) -> Result<(), anyhow::Error> {
     }
 }
 
-pub async fn remove_workflow(id: &str) -> Result<(), anyhow::Error> {
-    match api::remove_workflow(id).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("Error removing workflow {}: {}", id, e);
-            Err(anyhow::anyhow!("Failed to remove workflow"))
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Context management
+// ---------------------------------------------------------------------------
 
 pub async fn list_contexts() -> Result<(), anyhow::Error> {
     let current = match ctx::get_current_context() {
@@ -151,31 +257,23 @@ pub async fn list_contexts() -> Result<(), anyhow::Error> {
     }
 }
 
-pub async fn generate() -> Result<(), anyhow::Error> {
-    tui::run().await
-}
-
-pub async fn get_workflow(id: &str, output: Option<String>) -> Result<(), anyhow::Error> {
-    match api::get_workflow(id).await {
-        Ok(config) => {
-            match output.as_deref() {
-                Some("json") => {
-                    println!("\n{}\n", serde_json::to_string_pretty(&config)?);
-                }
-                Some("yaml") => {
-                    let yaml = serde_yaml_bw::to_string(&config)?;
-                    println!("\n{}\n", yaml);
-                }
-                _ => {
-                    eprintln!("Unsupported output format. Use 'json' or 'yaml'.");
-                    return Err(anyhow::anyhow!("Unsupported output format"));
-                }
-            }
+pub async fn set_context(name: &str) -> Result<(), anyhow::Error> {
+    match ctx::set_current_context(name) {
+        Ok(_) => {
+            println!("Current context set to '{}'", name);
             Ok(())
         }
         Err(e) => {
-            eprintln!("Error getting workflow {}: {}", id, e);
-            Err(anyhow::anyhow!("Failed to get workflow"))
+            eprintln!("Error setting context '{}': {}", name, e);
+            Err(anyhow::anyhow!("Failed to set context"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AI TUI
+// ---------------------------------------------------------------------------
+
+pub async fn generate() -> Result<(), anyhow::Error> {
+    tui::run().await
 }
