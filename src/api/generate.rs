@@ -9,7 +9,6 @@ use axum::{
 use eng::{Config, WorkflowInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Request / Response
@@ -117,39 +116,13 @@ impl IntoResponse for GenerateError {
 // System prompt
 // ---------------------------------------------------------------------------
 
-fn prompt_file_path() -> PathBuf {
-    let dir = std::env::var("ENGINE_DIR").unwrap_or_else(|_| ".starlight/engine".to_string());
-    PathBuf::from(dir).join("prompt.md")
-}
-
 fn build_system_prompt(task_types: &[&str]) -> Result<String, GenerateError> {
-    let reference = std::fs::read_to_string(prompt_file_path())
-        .map_err(|e| GenerateError::PromptFile(format!("{}: {e}", prompt_file_path().display())))?;
-
+    let prompt = include_str!("prompt.md");
     Ok(format!(
-        r#"You are a workflow generator for the Starlight engine.
-Your job is to help users build valid workflow configurations.
+        r#"
+{prompt}
 
-{reference}
-
-Available task types registered in this engine: {types}
-
-## Interaction rules
-
-1. Analyze the user's request carefully. If critical information is missing to produce a correct workflow, ask clarifying questions BEFORE generating the config. Examples of missing info:
-   - File paths for csv_reader or csv_writer
-   - Column names or field names for json_mapper, filter, aggregator
-   - URL for http_sender
-   - Specific numeric ranges, intervals, or thresholds
-   - Ambiguous workflow topology (unclear what connects to what)
-
-2. Ask all your questions in a single concise message. Do not ask one question at a time.
-
-3. When you have enough information, output ONLY the JSON workflow config. No explanations, no markdown fences, no text before or after — just the raw JSON object.
-
-4. Every task must have: id, type, dependencies, params, outputs.
-   - Source tasks (no input): `"dependencies": []`
-   - Sink tasks (no output): `"outputs": {{}}`"#,
+Available task types registered in this engine: {types}"#,
         types = task_types.join(", ")
     ))
 }
