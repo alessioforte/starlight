@@ -3,6 +3,10 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use pulldown_cmark::{
+    Alignment as MarkdownAlignment, Event as MarkdownEvent, Options as MarkdownOptions,
+    Parser as MarkdownParser, Tag as MarkdownTag, TagEnd as MarkdownTagEnd,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Margin},
@@ -10,7 +14,11 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
-use std::io;
+use std::{io, ops::Range};
+use tabled::{
+    builder::Builder,
+    settings::{Alignment as TableAlignment, Modify, Style as TableStyle, Width, object::Columns},
+};
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
@@ -178,7 +186,140 @@ fn convert_color(c: ratatui_core::style::Color) -> Color {
     }
 }
 
-fn render_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+#[derive(Debug)]
+enum MarkdownSegment<'a> {
+    Markdown(&'a str),
+    Table(MarkdownTable),
+}
+
+#[derive(Debug)]
+struct MarkdownTable {
+    alignments: Vec<MarkdownAlignment>,
+    rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct MarkdownTableState {
+    source_range: Range<usize>,
+    table: MarkdownTable,
+    current_row: Option<Vec<String>>,
+    current_cell: Option<String>,
+}
+
+impl MarkdownTableState {
+    fn new(source_range: Range<usize>, alignments: Vec<MarkdownAlignment>) -> Self {
+        Self {
+            source_range,
+            table: MarkdownTable {
+                alignments,
+                rows: Vec::new(),
+            },
+            current_row: None,
+            current_cell: None,
+        }
+    }
+
+    fn push_event(&mut self, event: MarkdownEvent<'_>) {
+        match event {
+            MarkdownEvent::Start(MarkdownTag::TableHead) => {
+                self.current_row = Some(Vec::new());
+            }
+            MarkdownEvent::End(MarkdownTagEnd::TableHead) => {
+                if let Some(row) = self.current_row.take() {
+                    self.table.rows.push(row);
+                }
+            }
+            MarkdownEvent::Start(MarkdownTag::TableRow) => {
+                self.current_row = Some(Vec::new());
+            }
+            MarkdownEvent::End(MarkdownTagEnd::TableRow) => {
+                if let Some(row) = self.current_row.take() {
+                    self.table.rows.push(row);
+                }
+            }
+            MarkdownEvent::Start(MarkdownTag::TableCell) => {
+                self.current_cell = Some(String::new());
+            }
+            MarkdownEvent::End(MarkdownTagEnd::TableCell) => {
+                if let (Some(row), Some(cell)) =
+                    (self.current_row.as_mut(), self.current_cell.take())
+                {
+                    row.push(cell.trim().to_string());
+                }
+            }
+            MarkdownEvent::Text(text)
+            | MarkdownEvent::Code(text)
+            | MarkdownEvent::InlineMath(text)
+            | MarkdownEvent::DisplayMath(text)
+            | MarkdownEvent::Html(text)
+            | MarkdownEvent::InlineHtml(text)
+            | MarkdownEvent::FootnoteReference(text) => {
+                if let Some(cell) = self.current_cell.as_mut() {
+                    cell.push_str(&text);
+                }
+            }
+            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak => {
+                if let Some(cell) = self.current_cell.as_mut() {
+                    cell.push('\n');
+                }
+            }
+            MarkdownEvent::Rule => {
+                if let Some(cell) = self.current_cell.as_mut() {
+                    cell.push_str("---");
+                }
+            }
+            MarkdownEvent::TaskListMarker(checked) => {
+                if let Some(cell) = self.current_cell.as_mut() {
+                    cell.push_str(if checked { "[x] " } else { "[ ] " });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn split_markdown_segments(text: &str) -> Vec<MarkdownSegment<'_>> {
+    let mut options = MarkdownOptions::empty();
+    options.insert(MarkdownOptions::ENABLE_TABLES);
+
+    let mut segments = Vec::new();
+    let mut next_markdown_start = 0;
+    let mut table_state: Option<MarkdownTableState> = None;
+
+    for (event, range) in MarkdownParser::new_ext(text, options).into_offset_iter() {
+        match event {
+            MarkdownEvent::Start(MarkdownTag::Table(alignments)) => {
+                if range.start > next_markdown_start {
+                    segments.push(MarkdownSegment::Markdown(
+                        &text[next_markdown_start..range.start],
+                    ));
+                }
+                table_state = Some(MarkdownTableState::new(range, alignments));
+            }
+            MarkdownEvent::End(MarkdownTagEnd::Table) => {
+                if let Some(state) = table_state.take() {
+                    next_markdown_start = state.source_range.end;
+                    if !state.table.rows.is_empty() {
+                        segments.push(MarkdownSegment::Table(state.table));
+                    }
+                }
+            }
+            event => {
+                if let Some(state) = table_state.as_mut() {
+                    state.push_event(event);
+                }
+            }
+        }
+    }
+
+    if next_markdown_start < text.len() {
+        segments.push(MarkdownSegment::Markdown(&text[next_markdown_start..]));
+    }
+
+    segments
+}
+
+fn render_tui_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     let md_text = tui_markdown::from_str(text);
     let mut lines = Vec::new();
     for line in md_text.lines {
@@ -194,9 +335,59 @@ fn render_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
         } else {
             let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let chars: Vec<char> = flat.chars().collect();
-            for chunk in chars.chunks(width as usize) {
+            for chunk in chars.chunks(width.max(1) as usize) {
                 let s: String = chunk.iter().collect();
                 lines.push(Line::from(format!(" {s}")));
+            }
+        }
+    }
+    lines
+}
+
+fn render_markdown_table(table: MarkdownTable, width: u16) -> Vec<Line<'static>> {
+    let mut builder = Builder::new();
+    for row in table.rows {
+        builder.push_record(row);
+    }
+
+    let mut table_view = builder.build();
+    table_view
+        .with(TableStyle::psql())
+        .with(Width::wrap(width.saturating_sub(1).max(1) as usize).keep_words(true));
+
+    for (column, alignment) in table.alignments.into_iter().enumerate() {
+        match alignment {
+            MarkdownAlignment::Left => {
+                table_view.with(Modify::new(Columns::one(column)).with(TableAlignment::left()));
+            }
+            MarkdownAlignment::Center => {
+                table_view.with(Modify::new(Columns::one(column)).with(TableAlignment::center()));
+            }
+            MarkdownAlignment::Right => {
+                table_view.with(Modify::new(Columns::one(column)).with(TableAlignment::right()));
+            }
+            MarkdownAlignment::None => {}
+        }
+    }
+
+    table_view
+        .to_string()
+        .lines()
+        .map(|line| Line::from(format!(" {line}")))
+        .collect()
+}
+
+fn render_markdown_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for segment in split_markdown_segments(text) {
+        match segment {
+            MarkdownSegment::Markdown(markdown) => {
+                lines.extend(render_tui_markdown_lines(markdown, width));
+            }
+            MarkdownSegment::Table(table) => {
+                lines.push(Line::from(""));
+                lines.extend(render_markdown_table(table, width));
+                lines.push(Line::from(""));
             }
         }
     }
@@ -599,4 +790,51 @@ async fn run_inner() -> anyhow::Result<()> {
 
     ratatui::restore();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn renders_markdown_tables_with_tabled() {
+        let markdown = "| Name | Count |\n| :--- | ----: |\n| Alpha | 12 |\n";
+
+        let rendered_lines = render_markdown_lines(markdown, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        let rendered = rendered_lines.join("\n");
+
+        assert_eq!(rendered_lines.first().map(String::as_str), Some(""));
+        assert_eq!(rendered_lines.last().map(String::as_str), Some(""));
+        assert!(rendered.contains("Name"));
+        assert!(rendered.contains("Count"));
+        assert!(rendered.contains("Alpha"));
+        assert!(!rendered.contains(":---"));
+        assert!(!rendered.contains("----:"));
+    }
+
+    #[test]
+    fn keeps_markdown_before_and_after_tables() {
+        let markdown = "Before\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nAfter";
+
+        let rendered = render_markdown_lines(markdown, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Before"));
+        assert!(rendered.contains("A"));
+        assert!(rendered.contains("1"));
+        assert!(rendered.contains("After"));
+    }
 }
