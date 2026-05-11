@@ -24,7 +24,13 @@ async fn main() {
     engine.register_task("simulator", tasks::simulator::SimulatorTask::create);
     let engine = Arc::new(Mutex::new(engine));
 
-    let app = Router::new().merge(api::routes()).with_state(AppState {
+    let base_path = std::env::var("BASE_PATH").unwrap_or_default();
+    let app = if base_path.is_empty() {
+        Router::new().merge(api::routes())
+    } else {
+        Router::new().nest(&base_path, api::routes())
+    }
+    .with_state(AppState {
         engine: engine.clone(),
     });
 
