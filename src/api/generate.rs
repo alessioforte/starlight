@@ -46,7 +46,8 @@ fn default_base_url() -> String {
 
 #[derive(Serialize)]
 pub struct GenerateResponse {
-    /// `"questions"` when the model needs more info, `"completed"` when config is ready.
+    /// `"questions"` when the model needs more info, `"completed"` when config is ready,
+    /// `"validation_failed"` when the model could not repair an invalid config.
     pub status: String,
     /// The model's question text (present when status is "questions").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,8 +58,18 @@ pub struct GenerateResponse {
     /// Workflow info if auto_load was requested (present when status is "completed").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<WorkflowInfo>,
+    /// Validation summary for generated configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ValidationReport>,
     /// Full conversation history — send this back in the next request to continue.
     pub messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationReport {
+    pub valid: bool,
+    pub attempts: usize,
+    pub errors: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,12 +80,7 @@ enum GenerateError {
     BadRequest(String),
     LlmConnection(String),
     LlmResponse(String),
-    UnknownTaskType {
-        task_type: String,
-        available: Vec<String>,
-    },
     Engine(String),
-    PromptFile(String),
 }
 
 impl IntoResponse for GenerateError {
@@ -92,20 +98,9 @@ impl IntoResponse for GenerateError {
                 StatusCode::BAD_GATEWAY,
                 json!({"error": "llm_response_invalid", "message": e}),
             ),
-            Self::UnknownTaskType {
-                task_type,
-                available,
-            } => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                json!({"error": "unknown_task_type", "task_type": task_type, "available": available}),
-            ),
             Self::Engine(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({"error": "engine_error", "message": e}),
-            ),
-            Self::PromptFile(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": "prompt_file_error", "message": e}),
             ),
         };
         (status, Json(body)).into_response()
@@ -130,6 +125,8 @@ Available task types registered in this engine: {types}"#,
 // ---------------------------------------------------------------------------
 // LLM client
 // ---------------------------------------------------------------------------
+
+const MAX_VALIDATION_ATTEMPTS: usize = 3;
 
 async fn call_llm(
     base_url: &str,
@@ -205,9 +202,50 @@ fn extract_json(raw: &str) -> Option<String> {
     None
 }
 
-fn try_parse_config(raw: &str) -> Option<Config> {
-    let json_str = extract_json(raw)?;
-    serde_json::from_str(&json_str).ok()
+enum ParsedOutput {
+    Config(Config),
+    Questions(String),
+    InvalidConfigJson(String),
+}
+
+fn parse_llm_output(raw: &str) -> ParsedOutput {
+    let Some(json_str) = extract_json(raw) else {
+        return ParsedOutput::Questions(raw.to_string());
+    };
+
+    match serde_json::from_str(&json_str) {
+        Ok(config) => ParsedOutput::Config(config),
+        Err(e) => ParsedOutput::InvalidConfigJson(e.to_string()),
+    }
+}
+
+fn build_json_repair_prompt(error: &str) -> String {
+    format!(
+        r#"The previous response contained JSON but it was not a valid Starlight workflow config.
+
+Parser error:
+{error}
+
+Return a corrected raw JSON workflow config only. If the user's request is missing critical details, ask all clarifying questions in one concise message instead of returning JSON."#
+    )
+}
+
+fn build_validation_repair_prompt(error: &str) -> String {
+    format!(
+        r#"The previous workflow config failed Starlight engine validation.
+
+Validation error:
+{error}
+
+Return a corrected raw JSON workflow config only. Preserve the user's intended workflow, but fix schema, task parameters, task IDs, channels, dependencies, and task types as needed. If the user's request is missing critical details, ask all clarifying questions in one concise message instead of returning JSON."#
+    )
+}
+
+fn validation_failed_message(errors: &[String]) -> String {
+    let latest_error = errors.last().map(String::as_str).unwrap_or("unknown error");
+    format!(
+        "I generated a workflow config, but it still failed validation after {MAX_VALIDATION_ATTEMPTS} attempts.\n\nLatest validation error:\n\n```text\n{latest_error}\n```\n\nPlease clarify the workflow details or adjust the request."
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -250,57 +288,112 @@ async fn generate_workflow(
     let task_refs: Vec<&str> = task_types.iter().map(|s| s.as_str()).collect();
     let system_prompt = build_system_prompt(&task_refs)?;
 
-    // 3. Call LLM (engine lock released)
-    let raw_output = call_llm(&request.base_url, &request.model, &messages, &system_prompt).await?;
+    // 3. Agent loop: generate, validate, and feed validation errors back for repair.
+    let mut validation_errors = Vec::new();
 
-    // 4. Append assistant response to conversation history
-    messages.push(ChatMessage {
-        role: "assistant".into(),
-        content: raw_output.clone(),
-    });
+    for attempt in 1..=MAX_VALIDATION_ATTEMPTS {
+        let raw_output =
+            call_llm(&request.base_url, &request.model, &messages, &system_prompt).await?;
 
-    // 5. Try to parse as Config — if it fails, the model is asking questions
-    let config = match try_parse_config(&raw_output) {
-        Some(cfg) => cfg,
-        None => {
-            return Ok(Json(GenerateResponse {
-                status: "questions".into(),
-                message: Some(raw_output),
-                config: None,
-                workflow: None,
-                messages,
-            }));
-        }
-    };
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: raw_output.clone(),
+        });
 
-    // 6. Validate task types
-    for task in &config.tasks {
-        if !task_refs.contains(&task.kind.as_str()) {
-            return Err(GenerateError::UnknownTaskType {
-                task_type: task.kind.clone(),
-                available: task_types.clone(),
+        let config = match parse_llm_output(&raw_output) {
+            ParsedOutput::Config(config) => config,
+            ParsedOutput::Questions(question) => {
+                return Ok(Json(GenerateResponse {
+                    status: "questions".into(),
+                    message: Some(question),
+                    config: None,
+                    workflow: None,
+                    validation: None,
+                    messages,
+                }));
+            }
+            ParsedOutput::InvalidConfigJson(error) => {
+                validation_errors.push(format!("invalid JSON workflow config: {error}"));
+                if attempt == MAX_VALIDATION_ATTEMPTS {
+                    let message = validation_failed_message(&validation_errors);
+                    return Ok(Json(GenerateResponse {
+                        status: "validation_failed".into(),
+                        message: Some(message),
+                        config: None,
+                        workflow: None,
+                        validation: Some(ValidationReport {
+                            valid: false,
+                            attempts: attempt,
+                            errors: validation_errors,
+                        }),
+                        messages,
+                    }));
+                }
+
+                messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: build_json_repair_prompt(&error),
+                });
+                continue;
+            }
+        };
+
+        let validation_error = {
+            let engine = state.engine.lock().await;
+            engine.validate_config(&config).err().map(|e| e.to_string())
+        };
+
+        if let Some(error) = validation_error {
+            validation_errors.push(error.clone());
+            if attempt == MAX_VALIDATION_ATTEMPTS {
+                let message = validation_failed_message(&validation_errors);
+                return Ok(Json(GenerateResponse {
+                    status: "validation_failed".into(),
+                    message: Some(message),
+                    config: None,
+                    workflow: None,
+                    validation: Some(ValidationReport {
+                        valid: false,
+                        attempts: attempt,
+                        errors: validation_errors,
+                    }),
+                    messages,
+                }));
+            }
+
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: build_validation_repair_prompt(&error),
             });
+            continue;
         }
+
+        // 4. Optionally auto-load after validation has passed.
+        let workflow_info = if request.auto_load {
+            let mut engine = state.engine.lock().await;
+            let wf = engine
+                .add(config.clone())
+                .map_err(|e| GenerateError::Engine(e.to_string()))?;
+            Some(wf.info().await)
+        } else {
+            None
+        };
+
+        return Ok(Json(GenerateResponse {
+            status: "completed".into(),
+            message: None,
+            config: Some(config),
+            workflow: workflow_info,
+            validation: Some(ValidationReport {
+                valid: true,
+                attempts: attempt,
+                errors: validation_errors,
+            }),
+            messages,
+        }));
     }
 
-    // 7. Optionally auto-load
-    let workflow_info = if request.auto_load {
-        let mut engine = state.engine.lock().await;
-        let wf = engine
-            .add(config.clone())
-            .map_err(|e| GenerateError::Engine(e.to_string()))?;
-        Some(wf.info().await)
-    } else {
-        None
-    };
-
-    Ok(Json(GenerateResponse {
-        status: "completed".into(),
-        message: None,
-        config: Some(config),
-        workflow: workflow_info,
-        messages,
-    }))
+    unreachable!("validation attempts loop always returns")
 }
 
 // ---------------------------------------------------------------------------
@@ -309,4 +402,31 @@ async fn generate_workflow(
 
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new().route("/workflows/generate", post(generate_workflow))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_llm_output_treats_plain_text_as_questions() {
+        match parse_llm_output("Which CSV file should I read?") {
+            ParsedOutput::Questions(question) => {
+                assert_eq!(question, "Which CSV file should I read?");
+            }
+            _ => panic!("expected questions"),
+        }
+    }
+
+    #[test]
+    fn parse_llm_output_reports_invalid_workflow_json() {
+        let raw = r#"{"id":"bad","tasks":[]}"#;
+
+        match parse_llm_output(raw) {
+            ParsedOutput::InvalidConfigJson(error) => {
+                assert!(error.contains("missing field `name`"));
+            }
+            _ => panic!("expected invalid config JSON"),
+        }
+    }
 }

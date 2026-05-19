@@ -100,10 +100,30 @@ impl App {
                     .as_ref()
                     .map(|c| c.name.clone())
                     .unwrap_or_default();
+                let content = match response.validation.as_ref() {
+                    Some(v) if v.valid && v.attempts > 1 => {
+                        format!("Workflow generated, repaired, and validated: {name}")
+                    }
+                    Some(v) if v.valid => format!("Workflow generated and validated: {name}"),
+                    _ => format!("Workflow generated: {name}"),
+                };
                 self.messages.push(DisplayMessage {
                     role: Role::Assistant,
-                    content: format!("Workflow generated: {name}"),
+                    content,
                     config_json,
+                });
+            }
+            "validation_failed" => {
+                let fallback = response
+                    .validation
+                    .as_ref()
+                    .and_then(|v| v.errors.last())
+                    .map(|e| format!("Workflow validation failed:\n\n```text\n{e}\n```"))
+                    .unwrap_or_else(|| "Workflow validation failed.".into());
+                self.messages.push(DisplayMessage {
+                    role: Role::Assistant,
+                    content: response.message.unwrap_or(fallback),
+                    config_json: None,
                 });
             }
             _ => {

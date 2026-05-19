@@ -164,7 +164,15 @@ pub struct GenerateResponse {
     pub status: String,
     pub message: Option<String>,
     pub config: Option<eng::Config>,
+    pub validation: Option<GenerateValidation>,
     pub messages: Vec<ChatMessage>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GenerateValidation {
+    pub valid: bool,
+    pub attempts: usize,
+    pub errors: Vec<String>,
 }
 
 pub async fn generate_workflow(

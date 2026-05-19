@@ -404,8 +404,9 @@ impl<'r> WorkflowBuilder<'r> {
     /// This validates the configuration, creates all channels,
     /// instantiates tasks via the registry, and returns a ready-to-run workflow.
     pub fn build(self) -> Result<Workflow> {
-        // Validate workflow
-        self.validate()?;
+        // Validate the task graph before creating runtime resources. Task-specific
+        // params are still validated by task factories during spawn.
+        self.validate_structure()?;
 
         let (cmd_tx, _) = watch::channel(Command::Pause);
         let status = Arc::new(tokio::sync::RwLock::new(WorkflowStatus::Idle));
@@ -436,8 +437,15 @@ impl<'r> WorkflowBuilder<'r> {
         Ok(workflow)
     }
 
-    /// Validate the workflow configuration
-    fn validate(&self) -> Result<()> {
+    /// Validate the workflow configuration without spawning tasks.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_structure()?;
+        self.validate_task_params()?;
+        Ok(())
+    }
+
+    /// Validate task graph shape and channel references.
+    fn validate_structure(&self) -> Result<()> {
         // Check that all task types exist in the registry
         for task in &self.tasks {
             if !self.registry.contains(&task.kind) {
@@ -493,6 +501,22 @@ impl<'r> WorkflowBuilder<'r> {
 
         // Check for circular dependencies using task-to-task relationships
         self.check_cycles()?;
+
+        Ok(())
+    }
+
+    /// Instantiate task factories to validate task-specific parameters.
+    fn validate_task_params(&self) -> Result<()> {
+        for task in &self.tasks {
+            self.registry
+                .create(&task.kind, task.id.clone(), task.params.clone())
+                .map_err(|e| {
+                    EngineError::Workflow(WorkflowError::InvalidConfig(
+                        self.id.clone(),
+                        format!("Failed to create task '{}': {}", task.id, e),
+                    ))
+                })?;
+        }
 
         Ok(())
     }

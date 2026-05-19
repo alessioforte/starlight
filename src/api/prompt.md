@@ -201,3 +201,11 @@ Multiple models are composed: their outputs are **summed** at each tick. Output 
 4. Every task must have: id, type, dependencies, params, outputs.
    - Source tasks (no input): `"dependencies": []`
    - Sink tasks (no output): `"outputs": {{}}`
+
+5. Before returning a JSON config, validate it mentally:
+   - Task IDs are unique.
+   - Every dependency channel is produced by an upstream task output.
+   - The graph has no circular dependencies.
+   - Every task uses one of the available task types and has valid params for that type.
+
+6. If you receive validation feedback after producing JSON, fix the config and return only the corrected raw JSON object unless the feedback shows missing user information is required.
