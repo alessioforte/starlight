@@ -1,0 +1,86 @@
+id: temperature_etl_jobs
+name: Temperature ETL Jobs
+description: Simulate temperature readings, write them to CSV, then normalize the CSV into a second shape.
+channel_buffer_size: 100
+jobs:
+  - id: simulate_temperature
+    name: Simulate Temperature
+    on_error: fail
+    artifacts:
+      - id: raw_temperature_csv
+        path: .starlight/data/temperature_raw.csv
+        format: csv
+    tasks:
+      - id: temperature_source
+        type: simulator
+        params:
+          interval_ms: 100
+          step_ms: 60000
+          count: 12
+          field: temperature_c
+          models:
+            - type: sine
+              amplitude: 4.0
+              frequency: 0.002
+              phase: 0.0
+            - type: random
+              mean: 21.0
+              stddev: 0.4
+              seed: 42
+        dependencies: []
+        outputs:
+          out: [raw_temperature_readings]
+
+      - id: write_raw_temperature
+        type: csv_writer
+        params:
+          filename: .starlight/data/temperature_raw.csv
+          write_mode: overwrite
+          flush_every: 1
+          header:
+            explicit: [tick, time_ms, temperature_c]
+        dependencies: [raw_temperature_readings]
+        outputs: {}
+
+  - id: normalize_temperature
+    name: Normalize Temperature
+    on_error: fail
+    resources:
+      - id: raw_temperature
+        source:
+          type: artifact
+          ref: raw_temperature_csv
+          format: csv
+    tasks:
+      - id: read_raw_temperature
+        type: csv_reader
+        uses: [raw_temperature]
+        params:
+          filename: .starlight/data/temperature_raw.csv
+          interval_ms: 0
+        dependencies: []
+        outputs:
+          out: [raw_temperature_rows]
+
+      - id: map_temperature_fields
+        type: json_mapper
+        params:
+          pass_through: false
+          mappings:
+            sample_index: tick
+            observed_at_ms: time_ms
+            celsius: temperature_c
+        dependencies: [raw_temperature_rows]
+        outputs:
+          out: [normalized_temperature_rows]
+
+      - id: write_normalized_temperature
+        type: csv_writer
+        params:
+          filename: .starlight/data/temperature_normalized.csv
+          write_mode: overwrite
+          flush_every: 1
+          header:
+            explicit: [sample_index, observed_at_ms, celsius]
+        dependencies: [normalized_temperature_rows]
+        outputs: {}

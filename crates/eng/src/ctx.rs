@@ -6,6 +6,7 @@
 use crate::err::{ChannelError, EngineError, Result};
 use crate::metrics::{CoarseClock, MetricsSnapshot, TaskMetrics};
 use crate::msg::Msg;
+use crate::resource::{ResourceMap, ResourceValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -231,13 +232,19 @@ pub struct TaskContext {
     /// Names of the input ports (for metadata queries — always available)
     input_port_names: Arc<Vec<String>>,
 
+    /// Names of the output labels (for metadata queries — always available)
+    output_label_names: Arc<Vec<String>>,
+
     /// Input receivers, keyed by port name.
     /// Each port can have multiple channels (channel_id, Receiver).
     /// Behind a Mutex because `mpsc::Receiver` is not Clone and must be *taken*.
     inputs: Arc<tokio::sync::Mutex<HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>>>,
 
     /// Output senders, keyed by label
-    outputs: Arc<HashMap<String, Vec<mpsc::Sender<Msg>>>>,
+    outputs: Arc<std::sync::Mutex<HashMap<String, Vec<mpsc::Sender<Msg>>>>>,
+
+    /// Read-only resources visible to this task
+    resources: Arc<ResourceMap>,
 
     /// Channel capacity (used when creating the merged‐input channel)
     channel_capacity: usize,
@@ -271,7 +278,14 @@ impl TaskContext {
         inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
     ) -> Self {
-        Self::build(id, inputs, outputs, 1000, None)
+        Self::build(
+            id,
+            inputs,
+            outputs,
+            Arc::new(ResourceMap::new()),
+            1000,
+            None,
+        )
     }
 
     /// Create a new task context with explicit capacity and optional clock
@@ -282,22 +296,45 @@ impl TaskContext {
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
-        Self::build(id, inputs, outputs, channel_capacity, clock)
+        Self::build(
+            id,
+            inputs,
+            outputs,
+            Arc::new(ResourceMap::new()),
+            channel_capacity,
+            clock,
+        )
+    }
+
+    /// Create a new task context with explicit resources, capacity, and clock.
+    pub(crate) fn with_capacity_and_resources(
+        id: String,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
+        resources: Arc<ResourceMap>,
+        channel_capacity: usize,
+        clock: Option<CoarseClock>,
+    ) -> Self {
+        Self::build(id, inputs, outputs, resources, channel_capacity, clock)
     }
 
     fn build(
         id: String,
         inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
+        resources: Arc<ResourceMap>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
         let port_names: Vec<String> = inputs.keys().cloned().collect();
+        let output_labels: Vec<String> = outputs.keys().cloned().collect();
         Self {
             id,
             input_port_names: Arc::new(port_names),
+            output_label_names: Arc::new(output_labels),
             inputs: Arc::new(tokio::sync::Mutex::new(inputs)),
-            outputs: Arc::new(outputs),
+            outputs: Arc::new(std::sync::Mutex::new(outputs)),
+            resources,
             channel_capacity,
             running: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -306,6 +343,23 @@ impl TaskContext {
             metrics: Arc::new(TaskMetrics::new()),
             clock,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Resource access
+    // ------------------------------------------------------------------
+
+    /// Get a read-only resource visible to this task.
+    pub fn resource(&self, id: &str) -> Result<ResourceValue> {
+        self.resources
+            .get(id)
+            .cloned()
+            .ok_or_else(|| EngineError::config(format!("resource '{}' not found", id)))
+    }
+
+    /// Get all resource IDs visible to this task.
+    pub fn resource_ids(&self) -> Vec<&str> {
+        self.resources.keys().map(|s| s.as_str()).collect()
     }
 
     // ------------------------------------------------------------------
@@ -465,6 +519,8 @@ impl TaskContext {
     pub fn output(&self, label: &str) -> Result<Output> {
         let handles: Vec<mpsc::Sender<Msg>> = self
             .outputs
+            .lock()
+            .expect("outputs mutex poisoned")
             .get(label)
             .ok_or_else(|| EngineError::Channel(ChannelError::OutputNotFound(label.to_string())))?
             .clone();
@@ -522,12 +578,22 @@ impl TaskContext {
         self.stopped.store(true, Ordering::Release);
         self.running.store(false, Ordering::Release);
         self.resume_notify.notify_waiters();
+        self.close_outputs();
 
         // Cancel any merged-input forwarder tasks
         let handles = self.forwarders.lock().expect("forwarders mutex poisoned");
         for h in handles.iter() {
             h.abort();
         }
+    }
+
+    /// Drop all output senders held by this context.
+    ///
+    /// The workflow keeps task contexts around for state/metrics inspection after
+    /// a task exits. Without explicitly clearing outputs here, downstream sinks
+    /// that wait for channel close would never observe producer completion.
+    pub(crate) fn close_outputs(&self) {
+        self.outputs.lock().expect("outputs mutex poisoned").clear();
     }
 
     // ------------------------------------------------------------------
@@ -555,7 +621,7 @@ impl TaskContext {
 
     /// Get list of available output labels
     pub fn output_labels(&self) -> Vec<&str> {
-        self.outputs.keys().map(|s| s.as_str()).collect()
+        self.output_label_names.iter().map(|s| s.as_str()).collect()
     }
 
     /// Check if this is a source task (no inputs)
@@ -565,7 +631,7 @@ impl TaskContext {
 
     /// Check if this is a sink task (no outputs)
     pub fn is_sink(&self) -> bool {
-        self.outputs.is_empty()
+        self.output_label_names.is_empty()
     }
 }
 
@@ -575,6 +641,7 @@ impl std::fmt::Debug for TaskContext {
             .field("id", &self.id)
             .field("input_ports", &self.input_ports())
             .field("outputs", &self.output_labels())
+            .field("resources", &self.resource_ids())
             .field("is_running", &self.is_running())
             .finish()
     }
@@ -629,6 +696,30 @@ mod tests {
         assert!(ctx.is_source());
         assert!(ctx.is_sink());
         assert!(!ctx.is_running());
+    }
+
+    #[test]
+    fn test_context_resource_access() {
+        let mut resources = ResourceMap::new();
+        resources.insert(
+            "aliases".to_string(),
+            ResourceValue::Json(Arc::new(json!({"IT": "Italy"}))),
+        );
+
+        let ctx = TaskContext::with_capacity_and_resources(
+            "task1".to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(resources),
+            1000,
+            None,
+        );
+
+        match ctx.resource("aliases").unwrap() {
+            ResourceValue::Json(value) => assert_eq!(value["IT"], "Italy"),
+            _ => panic!("expected json resource"),
+        }
+        assert!(ctx.resource("missing").is_err());
     }
 
     #[tokio::test]
