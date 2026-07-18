@@ -244,6 +244,10 @@ impl Task for SimulatorTask {
         "Simulator"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<TaskStatus>>) {
         self.status = Some(status);
     }

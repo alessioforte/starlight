@@ -108,6 +108,14 @@ pub trait Task: Send + Sync + 'static {
     /// Get the task name for logging and identification
     fn name(&self) -> &str;
 
+    /// Output labels that must be declared in workflow configuration.
+    ///
+    /// Labels may be declared with no downstream channels when emitted
+    /// messages are intentionally discarded.
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Optional: Called before execute() starts
     ///
     /// Use this for initialization that should happen once per task start.

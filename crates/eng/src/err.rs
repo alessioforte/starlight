@@ -61,6 +61,9 @@ pub enum WorkflowError {
     #[error("Workflow '{0}' invalid configuration: {1}")]
     InvalidConfig(String, String),
 
+    #[error("Workflow '{0}' invalid state transition: {1}")]
+    InvalidTransition(String, String),
+
     #[error("Workflow '{0}' has circular dependencies")]
     CircularDependency(String),
 

@@ -90,6 +90,10 @@ impl Engine {
 
     pub fn add(&mut self, config: Config) -> Result<&Workflow> {
         let id = config.id.clone();
+        if self.workflows.contains_key(&id) {
+            return Err(EngineError::Workflow(WorkflowError::AlreadyExists(id)));
+        }
+
         let checkpoint = self
             .checkpoint_store
             .as_ref()

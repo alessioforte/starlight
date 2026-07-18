@@ -173,6 +173,10 @@ impl Task for Filter {
         "Filter"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
         self.base.status = Some(status);
     }
@@ -475,5 +479,45 @@ mod tests {
     fn test_filter_create_invalid() {
         let result = Filter::create("test".to_string(), json!({"wrong": true}));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn paused_filter_does_not_forward_a_message_received_while_paused() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let task = Filter::create(
+            "filter".to_string(),
+            json!({"conditions": [], "mode": "and"}),
+        )
+        .unwrap();
+        let (input_tx, input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let inputs = HashMap::from([("in".to_string(), vec![("source".to_string(), input_rx)])]);
+        let outputs = HashMap::from([("out".to_string(), vec![output_tx])]);
+        let ctx = Arc::new(TaskContext::new("filter".to_string(), inputs, outputs));
+        ctx.resume();
+
+        let run_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move { task.execute(run_ctx).await });
+        input_tx.send(json!({"warmup": true}).into()).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        ctx.pause();
+        input_tx.send(json!({"value": 1}).into()).await.unwrap();
+
+        let observed = tokio::time::timeout(Duration::from_millis(25), output_rx.recv()).await;
+        assert!(
+            observed.is_err(),
+            "filter emitted while the context was paused"
+        );
+
+        ctx.stop();
+        handle.abort();
     }
 }

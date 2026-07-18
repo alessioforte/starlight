@@ -159,6 +159,12 @@ impl JobRuntime {
 
         for task in &self.task_configs {
             for (label, channel_ids) in &task.outputs {
+                let output_senders = producer_senders
+                    .entry(task.id.clone())
+                    .or_default()
+                    .entry(label.clone())
+                    .or_default();
+
                 for channel_id in channel_ids {
                     let consumers = channel_consumers
                         .get(channel_id)
@@ -166,12 +172,7 @@ impl JobRuntime {
                         .unwrap_or_default();
                     for consumer_task_id in consumers {
                         let (tx, rx) = mpsc::channel(self.channel_capacity);
-                        producer_senders
-                            .entry(task.id.clone())
-                            .or_default()
-                            .entry(label.clone())
-                            .or_default()
-                            .push(tx);
+                        output_senders.push(tx);
 
                         let port_name = channel_to_port
                             .get(&(consumer_task_id.clone(), channel_id.clone()))
@@ -260,6 +261,10 @@ impl JobRuntime {
     }
 
     fn start(&self) -> Result<()> {
+        if self.handles.is_empty() {
+            return Ok(());
+        }
+
         self.cmd_tx.send(Command::Start).map_err(|e| {
             EngineError::Workflow(WorkflowError::StartFailed(
                 self.workflow_id.clone(),
@@ -626,6 +631,18 @@ impl Workflow {
 
     /// Pause the workflow
     pub async fn pause(&self) -> Result<()> {
+        let current = self
+            .status
+            .read()
+            .expect("workflow status lock poisoned")
+            .clone();
+        if current != WorkflowStatus::Running {
+            return Err(EngineError::Workflow(WorkflowError::InvalidTransition(
+                self.id.clone(),
+                format!("cannot pause workflow in state {current:?}"),
+            )));
+        }
+
         self.send_active_command(Command::Pause)?;
 
         {
@@ -1099,9 +1116,11 @@ impl<'r> WorkflowBuilder<'r> {
         let jobs = self.job_configs()?;
 
         // Validate the task graph before creating runtime resources. Task-specific
-        // params are still validated by task factories during spawn.
+        // parameters and declared output contracts are checked before spawn.
+        self.validate_channel_capacity()?;
         self.validate_structure_for_jobs(&jobs)?;
         self.validate_resource_visibility_for_jobs(&jobs)?;
+        self.validate_task_params_for_jobs(&jobs)?;
         let workflow_resources = Arc::new(load_resources(&self.resources)?);
 
         let checkpoint_progress = checkpoint_progress(&jobs, self.checkpoint.as_ref());
@@ -1146,9 +1165,21 @@ impl<'r> WorkflowBuilder<'r> {
     /// Validate the workflow configuration without spawning tasks.
     pub fn validate(&self) -> Result<()> {
         let jobs = self.job_configs()?;
+        self.validate_channel_capacity()?;
         self.validate_structure_for_jobs(&jobs)?;
         self.validate_resource_visibility_for_jobs(&jobs)?;
         self.validate_task_params_for_jobs(&jobs)?;
+        Ok(())
+    }
+
+    fn validate_channel_capacity(&self) -> Result<()> {
+        if self.channel_capacity == 0 {
+            return Err(EngineError::Workflow(WorkflowError::InvalidConfig(
+                self.id.clone(),
+                "channel capacity must be greater than zero".to_string(),
+            )));
+        }
+
         Ok(())
     }
 
@@ -1331,7 +1362,8 @@ impl<'r> WorkflowBuilder<'r> {
     fn validate_task_params_for_jobs(&self, jobs: &[JobConfig]) -> Result<()> {
         for job in jobs {
             for task in &job.tasks {
-                self.registry
+                let instance = self
+                    .registry
                     .create(&task.kind, task.id.clone(), task.params.clone())
                     .map_err(|e| {
                         EngineError::Workflow(WorkflowError::InvalidConfig(
@@ -1339,6 +1371,18 @@ impl<'r> WorkflowBuilder<'r> {
                             format!("Failed to create task '{}': {}", task.id, e),
                         ))
                     })?;
+
+                for required_output in instance.required_outputs() {
+                    if !task.outputs.contains_key(*required_output) {
+                        return Err(EngineError::Workflow(WorkflowError::InvalidConfig(
+                            self.id.clone(),
+                            format!(
+                                "Task '{}' of type '{}' requires output label '{}'",
+                                task.id, task.kind, required_output
+                            ),
+                        )));
+                    }
+                }
             }
         }
 
@@ -1347,12 +1391,16 @@ impl<'r> WorkflowBuilder<'r> {
 
     /// Check for circular dependencies using DFS
     fn check_cycles(&self, job_id: &str, tasks: &[TaskConfig]) -> Result<()> {
-        // Build a map from channel ID to the task that produces it
-        let mut channel_to_task: HashMap<&str, &str> = HashMap::new();
+        // A shared channel can have multiple producers; every producer forms
+        // an upstream edge for consumers of that channel.
+        let mut channel_to_tasks: HashMap<&str, Vec<&str>> = HashMap::new();
         for task in tasks {
             for (_label, channel_ids) in &task.outputs {
                 for channel_id in channel_ids {
-                    channel_to_task.insert(channel_id.as_str(), task.id.as_str());
+                    channel_to_tasks
+                        .entry(channel_id.as_str())
+                        .or_default()
+                        .push(task.id.as_str());
                 }
             }
         }
@@ -1363,8 +1411,8 @@ impl<'r> WorkflowBuilder<'r> {
             let mut upstream_tasks = Vec::new();
             for (_port, channel_ids) in &task.dependencies {
                 for dep_channel_id in channel_ids {
-                    if let Some(&upstream_task_id) = channel_to_task.get(dep_channel_id.as_str()) {
-                        upstream_tasks.push(upstream_task_id);
+                    if let Some(upstream_task_ids) = channel_to_tasks.get(dep_channel_id.as_str()) {
+                        upstream_tasks.extend(upstream_task_ids.iter().copied());
                     }
                 }
             }

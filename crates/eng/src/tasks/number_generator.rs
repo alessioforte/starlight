@@ -74,9 +74,18 @@ pub struct NumberGenerator {
 impl NumberGenerator {
     /// Create a new number generator task
     pub fn create(id: String, params: Value) -> Result<Box<dyn Task>> {
-        Ok(Box::new(Self {
-            base: BaseTask::new(id, params)?,
-        }))
+        let base: BaseTask<Params, State> = BaseTask::new(id, params)?;
+        if base.params.min > base.params.max {
+            return Err(crate::err::EngineError::invalid_params(
+                &base.id,
+                format!(
+                    "min ({}) must be <= max ({})",
+                    base.params.min, base.params.max
+                ),
+            ));
+        }
+
+        Ok(Box::new(Self { base }))
     }
 }
 
@@ -84,6 +93,10 @@ impl NumberGenerator {
 impl Task for NumberGenerator {
     fn name(&self) -> &str {
         "NumberGenerator"
+    }
+
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
     }
 
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
@@ -109,14 +122,6 @@ impl Task for NumberGenerator {
     async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
         let params = &self.base.params;
         let state = &self.base.state;
-
-        // Validate parameters
-        if params.min > params.max {
-            return Err(crate::err::EngineError::invalid_params(
-                &self.base.id,
-                format!("min ({}) must be <= max ({})", params.min, params.max),
-            ));
-        }
 
         // Get output channel
         let output = ctx.output("out")?;
@@ -231,7 +236,7 @@ mod tests {
         });
 
         let result = NumberGenerator::create("test".to_string(), params);
-        assert!(result.is_ok()); // Creation succeeds, validation happens in execute
+        assert!(result.is_err());
     }
 
     #[test]

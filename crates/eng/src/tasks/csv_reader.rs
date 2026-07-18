@@ -76,6 +76,10 @@ impl Task for CsvReader {
         "CsvReader"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
         self.base.status = Some(status);
     }
@@ -263,5 +267,41 @@ mod tests {
 
         let result = CsvReader::create("test".to_string(), params);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore = "phase 1 contract: CSV parsing does not yet handle quoted delimiters"]
+    async fn test_csv_reader_preserves_quoted_delimiters_in_fields() {
+        use std::collections::HashMap;
+        use tokio::sync::mpsc;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "name,age").unwrap();
+        writeln!(file, "\"Doe, Jane\",30").unwrap();
+        file.flush().unwrap();
+
+        let task = CsvReader::create(
+            "reader".to_string(),
+            json!({
+                "filename": file.path().to_str().unwrap(),
+                "delimiter": ",",
+                "interval_ms": 0
+            }),
+        )
+        .unwrap();
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let outputs = HashMap::from([("out".to_string(), vec![output_tx])]);
+        let ctx = Arc::new(TaskContext::new(
+            "reader".to_string(),
+            HashMap::new(),
+            outputs,
+        ));
+        ctx.resume();
+
+        task.execute(ctx).await.unwrap();
+
+        let msg = output_rx.try_recv().expect("expected one parsed record");
+        assert_eq!(msg["name"], json!("Doe, Jane"));
+        assert_eq!(msg["age"], json!("30"));
     }
 }

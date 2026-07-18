@@ -275,6 +275,10 @@ impl Task for HttpSender {
         "HttpSender"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
         self.base.status = Some(status);
     }
@@ -358,6 +362,7 @@ impl Task for HttpSender {
         } else {
             // Concurrent mode — use a semaphore to limit in-flight requests
             let semaphore = Arc::new(tokio::sync::Semaphore::new(params.concurrency));
+            let mut requests = tokio::task::JoinSet::new();
             let client = Arc::new(client);
             let method = Arc::new(method);
             let url = Arc::new(params.url.clone());
@@ -380,7 +385,7 @@ impl Task for HttpSender {
                         let error_output = Arc::clone(&error_output);
                         let task_id = task_id.clone();
 
-                        tokio::spawn(async move {
+                        requests.spawn(async move {
                             let body = Self::extract_body(&msg, &body_mode);
                             match Self::send_request(&client, &method, &url, body.as_ref(), &retry)
                                 .await
@@ -408,8 +413,10 @@ impl Task for HttpSender {
                 }
             }
 
-            // Wait for all in-flight requests to finish
-            let _ = semaphore.acquire_many(params.concurrency as u32).await;
+            if ctx.is_stopped() {
+                requests.abort_all();
+            }
+            while requests.join_next().await.is_some() {}
         }
 
         tracing::info!("HttpSender [{}]: Finished", self.base.id);
@@ -525,5 +532,64 @@ mod tests {
         let cfg = RetryConfig::default();
         assert_eq!(cfg.max_retries, 3);
         assert_eq!(cfg.backoff_ms, 1000);
+    }
+
+    #[tokio::test]
+    async fn stopped_concurrent_sender_does_not_publish_an_inflight_response() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::{mpsc, oneshot};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (received_tx, received_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            stream.read(&mut request).await.unwrap();
+            received_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                )
+                .await
+                .unwrap();
+        });
+
+        let task = HttpSender::create(
+            "sender".to_string(),
+            json!({
+                "url": url,
+                "method": "POST",
+                "concurrency": 2,
+                "retry": {"max_retries": 0, "backoff_ms": 0}
+            }),
+        )
+        .unwrap();
+        let (input_tx, input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let inputs = HashMap::from([("in".to_string(), vec![("request".to_string(), input_rx)])]);
+        let outputs = HashMap::from([("out".to_string(), vec![output_tx])]);
+        let ctx = Arc::new(TaskContext::new("sender".to_string(), inputs, outputs));
+        ctx.resume();
+
+        let run_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move { task.execute(run_ctx).await });
+        input_tx.send(json!({"send": true}).into()).await.unwrap();
+        received_rx.await.unwrap();
+
+        ctx.stop();
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+
+        let response = tokio::time::timeout(Duration::from_millis(100), output_rx.recv()).await;
+        assert!(
+            !matches!(response, Ok(Some(_))),
+            "sender emitted a response after stop"
+        );
+
+        handle.abort();
     }
 }

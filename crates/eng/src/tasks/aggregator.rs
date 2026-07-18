@@ -283,9 +283,15 @@ pub struct Aggregator {
 
 impl Aggregator {
     pub fn create(id: String, params: Value) -> Result<Box<dyn Task>> {
-        Ok(Box::new(Self {
-            base: BaseTask::new(id, params)?,
-        }))
+        let base: BaseTask<Params, State> = BaseTask::new(id, params)?;
+        if base.params.window_count.is_none() && base.params.window_ms.is_none() {
+            return Err(crate::err::EngineError::invalid_params(
+                &base.id,
+                "At least one of window_count or window_ms must be set".to_string(),
+            ));
+        }
+
+        Ok(Box::new(Self { base }))
     }
 
     /// Emit a window's aggregation result and reset it.
@@ -313,6 +319,10 @@ impl Task for Aggregator {
         "Aggregator"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
         self.base.status = Some(status);
     }
@@ -335,14 +345,6 @@ impl Task for Aggregator {
 
     async fn execute(&self, ctx: Arc<TaskContext>) -> Result<()> {
         let params = &self.base.params;
-
-        if params.window_count.is_none() && params.window_ms.is_none() {
-            return Err(crate::err::EngineError::invalid_params(
-                &self.base.id,
-                "At least one of window_count or window_ms must be set".to_string(),
-            ));
-        }
-
         let mut input = ctx.merged_input().await?;
         let output = ctx.output("out")?;
 
@@ -362,6 +364,10 @@ impl Task for Aggregator {
         let mut emitted = 0u64;
 
         loop {
+            if !ctx.running().await {
+                break;
+            }
+
             // If time-based windows are enabled, use a timeout on recv
             let recv_result = if let Some(tick) = tick_interval {
                 tokio::select! {
@@ -373,9 +379,9 @@ impl Task for Aggregator {
                 Some(input.recv().await)
             };
 
-            // Check if we should still be running
-            if !ctx.is_running() {
-                // Stopped — flush remaining windows below
+            // Hold received work and elapsed timer ticks until resume. A stop
+            // breaks out; output shutdown prevents late flushes being emitted.
+            if !ctx.running().await {
                 break;
             }
 
@@ -425,11 +431,6 @@ impl Task for Aggregator {
                             .await?;
                             emitted += 1;
                         }
-                    }
-
-                    // Re-check running state
-                    if !ctx.is_running() {
-                        break;
                     }
                 }
             }
@@ -680,5 +681,43 @@ mod tests {
     fn test_aggregator_create_invalid() {
         let result = Aggregator::create("test".into(), json!({"wrong": true}));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn paused_aggregator_keeps_its_open_window_without_flushing() {
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        let task = Aggregator::create(
+            "aggregator".to_string(),
+            json!({
+                "columns": [{"field": "value", "fn": "sum"}],
+                "window_ms": 50
+            }),
+        )
+        .unwrap();
+        let (input_tx, input_rx) = mpsc::channel(1);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let inputs = HashMap::from([("in".to_string(), vec![("source".to_string(), input_rx)])]);
+        let outputs = HashMap::from([("out".to_string(), vec![output_tx])]);
+        let ctx = Arc::new(TaskContext::new("aggregator".to_string(), inputs, outputs));
+        ctx.resume();
+
+        let run_ctx = Arc::clone(&ctx);
+        let handle = tokio::spawn(async move { task.execute(run_ctx).await });
+        input_tx.send(json!({"value": 1}).into()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        ctx.pause();
+        let observed = tokio::time::timeout(Duration::from_millis(75), output_rx.recv()).await;
+        assert!(
+            observed.is_err(),
+            "aggregator flushed an open window during pause"
+        );
+        assert!(!handle.is_finished(), "aggregator terminated during pause");
+
+        ctx.stop();
+        handle.abort();
     }
 }

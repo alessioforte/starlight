@@ -231,6 +231,10 @@ impl Task for MathExpEval {
         "MathExpEval"
     }
 
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &["out"]
+    }
+
     fn set_status_handle(&mut self, status: Arc<tokio::sync::RwLock<crate::task::TaskStatus>>) {
         self.base.status = Some(status);
     }

@@ -202,6 +202,7 @@ impl Config {
     /// schema. Task type and task parameter validation still belongs to the
     /// task registry and workflow builder.
     pub fn validate(&self) -> EngineResult<()> {
+        self.validate_workflow_options()?;
         let jobs = self.normalized_jobs()?;
         let workflow_resources = self.validate_workflow_resources()?;
         self.validate_jobs(&jobs, &workflow_resources)
@@ -231,6 +232,30 @@ impl Config {
     pub fn runtime_jobs(&self) -> EngineResult<Vec<JobConfig>> {
         self.validate()?;
         self.normalized_jobs()
+    }
+
+    fn validate_workflow_options(&self) -> EngineResult<()> {
+        if self.id.is_empty()
+            || matches!(self.id.as_str(), "." | "..")
+            || self
+                .id
+                .chars()
+                .any(|ch| ch == '/' || ch == '\\' || ch.is_control())
+        {
+            return Err(invalid_config(
+                &self.id,
+                "workflow ID must be a non-empty filesystem-safe path component",
+            ));
+        }
+
+        if self.channel_buffer_size == Some(0) {
+            return Err(invalid_config(
+                &self.id,
+                "channel_buffer_size must be greater than zero",
+            ));
+        }
+
+        Ok(())
     }
 
     fn validate_task_job_layout(&self) -> EngineResult<()> {

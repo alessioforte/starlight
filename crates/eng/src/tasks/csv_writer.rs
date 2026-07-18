@@ -399,6 +399,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "phase 1 contract: fields containing a configured delimiter are not quoted yet"]
+    fn test_build_line_quotes_custom_delimiter_in_value() {
+        let cols = vec!["value".into()];
+        let msg = json!({"value": "left;right"});
+        let line = build_line(&cols, &msg, ';');
+        assert_eq!(line, "\"left;right\"");
+    }
+
+    #[test]
     fn test_build_line_with_null() {
         let cols = vec!["a".into(), "b".into()];
         let msg = json!({"a": 1, "b": null});
