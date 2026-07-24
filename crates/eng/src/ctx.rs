@@ -6,11 +6,66 @@
 use crate::err::{ChannelError, EngineError, Result};
 use crate::metrics::{CoarseClock, MetricsSnapshot, TaskMetrics};
 use crate::msg::Msg;
+use crate::resource::{ResourceMap, ResourceValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::AbortHandle;
+
+#[derive(Clone)]
+struct LifecycleState {
+    running: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    state_notify: Arc<Notify>,
+}
+
+impl LifecycleState {
+    fn new() -> Self {
+        Self {
+            running: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            state_notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    async fn wait_until_running(&self) -> bool {
+        loop {
+            let notified = self.state_notify.notified();
+            if self.is_stopped() {
+                return false;
+            }
+            if self.is_running() {
+                return true;
+            }
+            notified.await;
+        }
+    }
+
+    fn resume(&self) {
+        self.running.store(true, Ordering::Release);
+        self.state_notify.notify_waiters();
+    }
+
+    fn pause(&self) {
+        self.running.store(false, Ordering::Release);
+        self.state_notify.notify_waiters();
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.running.store(false, Ordering::Release);
+        self.state_notify.notify_waiters();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Input
@@ -28,6 +83,7 @@ pub struct Input {
     rx: mpsc::Receiver<Msg>,
     metrics: Option<Arc<TaskMetrics>>,
     clock: Option<CoarseClock>,
+    lifecycle: Option<LifecycleState>,
 }
 
 impl Input {
@@ -39,21 +95,24 @@ impl Input {
             rx,
             metrics: None,
             clock: None,
+            lifecycle: None,
         }
     }
 
     /// Create a new input with metrics tracking
-    pub(crate) fn with_metrics(
+    fn with_metrics(
         id: String,
         rx: mpsc::Receiver<Msg>,
         metrics: Arc<TaskMetrics>,
         clock: Option<CoarseClock>,
+        lifecycle: LifecycleState,
     ) -> Self {
         Self {
             id,
             rx,
             metrics: Some(metrics),
             clock,
+            lifecycle: Some(lifecycle),
         }
     }
 
@@ -62,11 +121,32 @@ impl Input {
     /// Blocks until a message is available or the channel is closed.
     /// Automatically updates metrics counters when configured.
     pub async fn recv(&mut self) -> Result<Msg> {
-        let msg = self
-            .rx
-            .recv()
-            .await
-            .ok_or_else(|| EngineError::Channel(ChannelError::Closed(self.id.clone())))?;
+        let msg = if let Some(lifecycle) = &self.lifecycle {
+            loop {
+                if !lifecycle.wait_until_running().await {
+                    return Err(EngineError::Channel(ChannelError::Closed(self.id.clone())));
+                }
+
+                let state_changed = lifecycle.state_notify.notified();
+                let received = tokio::select! {
+                    biased;
+                    _ = state_changed => continue,
+                    received = self.rx.recv() => received,
+                };
+                let msg = received
+                    .ok_or_else(|| EngineError::Channel(ChannelError::Closed(self.id.clone())))?;
+
+                if lifecycle.wait_until_running().await {
+                    break msg;
+                }
+                return Err(EngineError::Channel(ChannelError::Closed(self.id.clone())));
+            }
+        } else {
+            self.rx
+                .recv()
+                .await
+                .ok_or_else(|| EngineError::Channel(ChannelError::Closed(self.id.clone())))?
+        };
 
         if let Some(m) = &self.metrics {
             m.messages_in.fetch_add(1, Ordering::Relaxed);
@@ -84,6 +164,15 @@ impl Input {
     /// `Ok(None)` if no message is available,
     /// or an error if the channel is closed.
     pub fn try_recv(&mut self) -> Result<Option<Msg>> {
+        if let Some(lifecycle) = &self.lifecycle {
+            if lifecycle.is_stopped() {
+                return Err(EngineError::Channel(ChannelError::Closed(self.id.clone())));
+            }
+            if !lifecycle.is_running() {
+                return Ok(None);
+            }
+        }
+
         match self.rx.try_recv() {
             Ok(msg) => {
                 if let Some(m) = &self.metrics {
@@ -129,6 +218,7 @@ pub struct Output {
     label: String,
     handles: Vec<mpsc::Sender<Msg>>,
     metrics: Option<Arc<TaskMetrics>>,
+    lifecycle: Option<LifecycleState>,
 }
 
 impl Output {
@@ -139,19 +229,22 @@ impl Output {
             label,
             handles,
             metrics: None,
+            lifecycle: None,
         }
     }
 
     /// Create a new output with metrics tracking
-    pub(crate) fn with_metrics(
+    fn with_metrics(
         label: String,
         handles: Vec<mpsc::Sender<Msg>>,
         metrics: Arc<TaskMetrics>,
+        lifecycle: LifecycleState,
     ) -> Self {
         Self {
             label,
             handles,
             metrics: Some(metrics),
+            lifecycle: Some(lifecycle),
         }
     }
 
@@ -162,25 +255,27 @@ impl Output {
     /// - Fan-out = 1: zero-copy (owned `Msg` forwarded directly)
     /// - Fan-out > 1: one `Arc::new` + N cheap `Arc::clone`s
     pub async fn send(&self, msg: Msg) -> Result<()> {
-        let err = |this: &Self| {
-            if let Some(m) = &this.metrics {
-                m.errors.fetch_add(1, Ordering::Relaxed);
-            }
-            EngineError::Channel(ChannelError::NoReceivers(this.label.clone()))
-        };
-
         match self.handles.len() {
             0 => {
+                if let Some(lifecycle) = &self.lifecycle {
+                    if !lifecycle.wait_until_running().await {
+                        return Ok(());
+                    }
+                }
                 tracing::trace!("Output '{}' has no receivers", self.label);
                 return Ok(());
             }
             1 => {
-                self.handles[0].send(msg).await.map_err(|_| err(self))?;
+                if !self.send_to(&self.handles[0], msg).await? {
+                    return Ok(());
+                }
             }
             _ => {
                 let shared = msg.to_shared();
                 for handle in &self.handles {
-                    handle.send(shared.clone()).await.map_err(|_| err(self))?;
+                    if !self.send_to(handle, shared.clone()).await? {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -189,6 +284,42 @@ impl Output {
             m.messages_out.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    async fn send_to(&self, handle: &mpsc::Sender<Msg>, msg: Msg) -> Result<bool> {
+        let err = || {
+            if let Some(m) = &self.metrics {
+                m.errors.fetch_add(1, Ordering::Relaxed);
+            }
+            EngineError::Channel(ChannelError::NoReceivers(self.label.clone()))
+        };
+
+        let Some(lifecycle) = &self.lifecycle else {
+            handle.send(msg).await.map_err(|_| err())?;
+            return Ok(true);
+        };
+
+        loop {
+            if !lifecycle.wait_until_running().await {
+                return Ok(false);
+            }
+
+            let state_changed = lifecycle.state_notify.notified();
+            let permit = tokio::select! {
+                biased;
+                _ = state_changed => continue,
+                permit = handle.reserve() => permit.map_err(|_| err())?,
+            };
+
+            if lifecycle.is_stopped() {
+                return Ok(false);
+            }
+            if lifecycle.is_running() {
+                permit.send(msg);
+                return Ok(true);
+            }
+            drop(permit);
+        }
     }
 
     /// Get the output label
@@ -231,25 +362,25 @@ pub struct TaskContext {
     /// Names of the input ports (for metadata queries — always available)
     input_port_names: Arc<Vec<String>>,
 
+    /// Names of the output labels (for metadata queries — always available)
+    output_label_names: Arc<Vec<String>>,
+
     /// Input receivers, keyed by port name.
     /// Each port can have multiple channels (channel_id, Receiver).
     /// Behind a Mutex because `mpsc::Receiver` is not Clone and must be *taken*.
     inputs: Arc<tokio::sync::Mutex<HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>>>,
 
     /// Output senders, keyed by label
-    outputs: Arc<HashMap<String, Vec<mpsc::Sender<Msg>>>>,
+    outputs: Arc<std::sync::Mutex<HashMap<String, Vec<mpsc::Sender<Msg>>>>>,
+
+    /// Read-only resources visible to this task
+    resources: Arc<ResourceMap>,
 
     /// Channel capacity (used when creating the merged‐input channel)
     channel_capacity: usize,
 
-    /// Whether the task should continue running
-    running: Arc<AtomicBool>,
-
-    /// Whether the task has been permanently stopped
-    stopped: Arc<AtomicBool>,
-
-    /// Notification for waking up paused tasks
-    resume_notify: Arc<Notify>,
+    /// Shared running/paused/stopped state for this task and its channel handles.
+    lifecycle: LifecycleState,
 
     /// Abort handles for merged-input forwarder tasks
     forwarders: Arc<std::sync::Mutex<Vec<AbortHandle>>>,
@@ -271,7 +402,14 @@ impl TaskContext {
         inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
     ) -> Self {
-        Self::build(id, inputs, outputs, 1000, None)
+        Self::build(
+            id,
+            inputs,
+            outputs,
+            Arc::new(ResourceMap::new()),
+            1000,
+            None,
+        )
     }
 
     /// Create a new task context with explicit capacity and optional clock
@@ -282,30 +420,68 @@ impl TaskContext {
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
-        Self::build(id, inputs, outputs, channel_capacity, clock)
+        Self::build(
+            id,
+            inputs,
+            outputs,
+            Arc::new(ResourceMap::new()),
+            channel_capacity,
+            clock,
+        )
+    }
+
+    /// Create a new task context with explicit resources, capacity, and clock.
+    pub(crate) fn with_capacity_and_resources(
+        id: String,
+        inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
+        outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
+        resources: Arc<ResourceMap>,
+        channel_capacity: usize,
+        clock: Option<CoarseClock>,
+    ) -> Self {
+        Self::build(id, inputs, outputs, resources, channel_capacity, clock)
     }
 
     fn build(
         id: String,
         inputs: HashMap<String, Vec<(String, mpsc::Receiver<Msg>)>>,
         outputs: HashMap<String, Vec<mpsc::Sender<Msg>>>,
+        resources: Arc<ResourceMap>,
         channel_capacity: usize,
         clock: Option<CoarseClock>,
     ) -> Self {
         let port_names: Vec<String> = inputs.keys().cloned().collect();
+        let output_labels: Vec<String> = outputs.keys().cloned().collect();
         Self {
             id,
             input_port_names: Arc::new(port_names),
+            output_label_names: Arc::new(output_labels),
             inputs: Arc::new(tokio::sync::Mutex::new(inputs)),
-            outputs: Arc::new(outputs),
+            outputs: Arc::new(std::sync::Mutex::new(outputs)),
+            resources,
             channel_capacity,
-            running: Arc::new(AtomicBool::new(false)),
-            stopped: Arc::new(AtomicBool::new(false)),
-            resume_notify: Arc::new(Notify::new()),
+            lifecycle: LifecycleState::new(),
             forwarders: Arc::new(std::sync::Mutex::new(Vec::new())),
             metrics: Arc::new(TaskMetrics::new()),
             clock,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Resource access
+    // ------------------------------------------------------------------
+
+    /// Get a read-only resource visible to this task.
+    pub fn resource(&self, id: &str) -> Result<ResourceValue> {
+        self.resources
+            .get(id)
+            .cloned()
+            .ok_or_else(|| EngineError::config(format!("resource '{}' not found", id)))
+    }
+
+    /// Get all resource IDs visible to this task.
+    pub fn resource_ids(&self) -> Vec<&str> {
+        self.resources.keys().map(|s| s.as_str()).collect()
     }
 
     // ------------------------------------------------------------------
@@ -380,7 +556,13 @@ impl TaskContext {
             .drain()
             .flat_map(|(_, rxs)| rxs)
             .map(|(id, rx)| {
-                Input::with_metrics(id, rx, Arc::clone(&self.metrics), self.clock.clone())
+                Input::with_metrics(
+                    id,
+                    rx,
+                    Arc::clone(&self.metrics),
+                    self.clock.clone(),
+                    self.lifecycle.clone(),
+                )
             })
             .collect();
         Ok(result)
@@ -421,6 +603,7 @@ impl TaskContext {
                 rx,
                 Arc::clone(&self.metrics),
                 self.clock.clone(),
+                self.lifecycle.clone(),
             ));
         }
 
@@ -454,6 +637,7 @@ impl TaskContext {
             merged_rx,
             Arc::clone(&self.metrics),
             self.clock.clone(),
+            self.lifecycle.clone(),
         ))
     }
 
@@ -465,6 +649,8 @@ impl TaskContext {
     pub fn output(&self, label: &str) -> Result<Output> {
         let handles: Vec<mpsc::Sender<Msg>> = self
             .outputs
+            .lock()
+            .expect("outputs mutex poisoned")
             .get(label)
             .ok_or_else(|| EngineError::Channel(ChannelError::OutputNotFound(label.to_string())))?
             .clone();
@@ -473,6 +659,7 @@ impl TaskContext {
             label.to_string(),
             handles,
             Arc::clone(&self.metrics),
+            self.lifecycle.clone(),
         ))
     }
 
@@ -490,44 +677,48 @@ impl TaskContext {
     /// }
     /// ```
     pub async fn running(&self) -> bool {
-        loop {
-            if self.stopped.load(Ordering::Acquire) {
-                return false;
-            }
-            if self.running.load(Ordering::Acquire) {
-                return true;
-            }
-            self.resume_notify.notified().await;
-        }
+        self.lifecycle.wait_until_running().await
     }
 
     /// Non-blocking check if the task is currently running.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.lifecycle.is_running()
+    }
+
+    /// Non-blocking check if the task was permanently stopped.
+    pub fn is_stopped(&self) -> bool {
+        self.lifecycle.is_stopped()
     }
 
     /// Resume the task (internal use)
     pub(crate) fn resume(&self) {
-        self.running.store(true, Ordering::Release);
-        self.resume_notify.notify_waiters();
+        self.lifecycle.resume();
     }
 
     /// Pause the task (internal use)
     pub(crate) fn pause(&self) {
-        self.running.store(false, Ordering::Release);
+        self.lifecycle.pause();
     }
 
     /// Permanently stop the task (internal use)
     pub(crate) fn stop(&self) {
-        self.stopped.store(true, Ordering::Release);
-        self.running.store(false, Ordering::Release);
-        self.resume_notify.notify_waiters();
+        self.lifecycle.stop();
+        self.close_outputs();
 
         // Cancel any merged-input forwarder tasks
         let handles = self.forwarders.lock().expect("forwarders mutex poisoned");
         for h in handles.iter() {
             h.abort();
         }
+    }
+
+    /// Drop all output senders held by this context.
+    ///
+    /// The workflow keeps task contexts around for state/metrics inspection after
+    /// a task exits. Without explicitly clearing outputs here, downstream sinks
+    /// that wait for channel close would never observe producer completion.
+    pub(crate) fn close_outputs(&self) {
+        self.outputs.lock().expect("outputs mutex poisoned").clear();
     }
 
     // ------------------------------------------------------------------
@@ -555,7 +746,7 @@ impl TaskContext {
 
     /// Get list of available output labels
     pub fn output_labels(&self) -> Vec<&str> {
-        self.outputs.keys().map(|s| s.as_str()).collect()
+        self.output_label_names.iter().map(|s| s.as_str()).collect()
     }
 
     /// Check if this is a source task (no inputs)
@@ -565,7 +756,7 @@ impl TaskContext {
 
     /// Check if this is a sink task (no outputs)
     pub fn is_sink(&self) -> bool {
-        self.outputs.is_empty()
+        self.output_label_names.is_empty()
     }
 }
 
@@ -575,6 +766,7 @@ impl std::fmt::Debug for TaskContext {
             .field("id", &self.id)
             .field("input_ports", &self.input_ports())
             .field("outputs", &self.output_labels())
+            .field("resources", &self.resource_ids())
             .field("is_running", &self.is_running())
             .finish()
     }
@@ -631,6 +823,30 @@ mod tests {
         assert!(!ctx.is_running());
     }
 
+    #[test]
+    fn test_context_resource_access() {
+        let mut resources = ResourceMap::new();
+        resources.insert(
+            "aliases".to_string(),
+            ResourceValue::Json(Arc::new(json!({"IT": "Italy"}))),
+        );
+
+        let ctx = TaskContext::with_capacity_and_resources(
+            "task1".to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(resources),
+            1000,
+            None,
+        );
+
+        match ctx.resource("aliases").unwrap() {
+            ResourceValue::Json(value) => assert_eq!(value["IT"], "Italy"),
+            _ => panic!("expected json resource"),
+        }
+        assert!(ctx.resource("missing").is_err());
+    }
+
     #[tokio::test]
     async fn test_context_with_channels() {
         let (_tx1, rx1) = mpsc::channel(10);
@@ -660,6 +876,7 @@ mod tests {
             inputs,
             HashMap::new(),
         ));
+        ctx.resume();
 
         // Get merged input (takes ownership of receivers)
         let mut merged = ctx.merged_input().await.unwrap();
@@ -702,6 +919,7 @@ mod tests {
             inputs,
             HashMap::new(),
         ));
+        ctx.resume();
 
         let mut merged = ctx.merged_input().await.unwrap();
         tokio::task::yield_now().await;
@@ -732,6 +950,7 @@ mod tests {
             inputs,
             HashMap::new(),
         ));
+        ctx.resume();
 
         let mut left = ctx.input("left").await.unwrap();
         let mut right = ctx.input("right").await.unwrap();
@@ -758,6 +977,7 @@ mod tests {
             inputs,
             HashMap::new(),
         ));
+        ctx.resume();
 
         let mut named = ctx.named_inputs().await.unwrap();
         assert_eq!(named.len(), 2);
@@ -792,6 +1012,7 @@ mod tests {
             inputs,
             HashMap::new(),
         ));
+        ctx.resume();
 
         let mut merged = ctx.merged_input().await.unwrap();
         tokio::task::yield_now().await;
@@ -857,5 +1078,55 @@ mod tests {
             send_handle.is_finished(),
             "send should have completed after drain"
         );
+    }
+
+    #[tokio::test]
+    async fn test_context_output_does_not_publish_while_paused() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let outputs = HashMap::from([("out".to_string(), vec![tx])]);
+        let ctx = Arc::new(TaskContext::new(
+            "task".to_string(),
+            HashMap::new(),
+            outputs,
+        ));
+        ctx.resume();
+
+        let output = ctx.output("out").unwrap();
+        output.send(json!(1).into()).await.unwrap();
+
+        ctx.pause();
+        let handle = tokio::spawn(async move { output.send(json!(2).into()).await.unwrap() });
+        tokio::task::yield_now().await;
+
+        assert_eq!(rx.recv().await.unwrap(), json!(1));
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        assert!(!handle.is_finished(), "send completed while paused");
+        assert!(rx.try_recv().is_err());
+
+        ctx.resume();
+        handle.await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), json!(2));
+    }
+
+    #[tokio::test]
+    async fn test_context_output_drops_blocked_send_after_stop() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let outputs = HashMap::from([("out".to_string(), vec![tx])]);
+        let ctx = Arc::new(TaskContext::new(
+            "task".to_string(),
+            HashMap::new(),
+            outputs,
+        ));
+        ctx.resume();
+
+        let output = ctx.output("out").unwrap();
+        output.send(json!(1).into()).await.unwrap();
+        let handle = tokio::spawn(async move { output.send(json!(2).into()).await.unwrap() });
+        tokio::task::yield_now().await;
+
+        ctx.stop();
+        assert_eq!(rx.recv().await.unwrap(), json!(1));
+        handle.await.unwrap();
+        assert!(!matches!(rx.try_recv(), Ok(msg) if msg == json!(2)));
     }
 }

@@ -49,7 +49,7 @@ pub async fn list_workflows(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WorkflowInfo>>, StatusCode> {
     let engine = state.engine.lock().await;
-    let workflows = engine.list().await;
+    let workflows = engine.list();
     Ok(Json(workflows))
 }
 
@@ -59,7 +59,7 @@ pub async fn get_workflow(
 ) -> Result<Json<WorkflowInfo>, StatusCode> {
     let engine = state.engine.lock().await;
     if let Some(workflow) = engine.get(&id) {
-        Ok(Json(workflow.info().await))
+        Ok(Json(workflow.info()))
     } else {
         Err(StatusCode::NOT_FOUND)
     }
@@ -140,7 +140,7 @@ pub async fn mount_workflow(
 
     // Already loaded — return its info
     if let Some(wf) = engine.get(&id) {
-        return Ok(Json(wf.info().await));
+        return Ok(Json(wf.info()));
     }
 
     let wf = engine.add(config).map_err(|e| {
@@ -150,7 +150,7 @@ pub async fn mount_workflow(
         )
     })?;
 
-    Ok(Json(wf.info().await))
+    Ok(Json(wf.info()))
 }
 
 /// Unload a workflow from the engine but keep the file on disk.

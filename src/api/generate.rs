@@ -374,7 +374,7 @@ async fn generate_workflow(
             let wf = engine
                 .add(config.clone())
                 .map_err(|e| GenerateError::Engine(e.to_string()))?;
-            Some(wf.info().await)
+            Some(wf.info())
         } else {
             None
         };

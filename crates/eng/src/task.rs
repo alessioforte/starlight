@@ -108,6 +108,14 @@ pub trait Task: Send + Sync + 'static {
     /// Get the task name for logging and identification
     fn name(&self) -> &str;
 
+    /// Output labels that must be declared in workflow configuration.
+    ///
+    /// Labels may be declared with no downstream channels when emitted
+    /// messages are intentionally discarded.
+    fn required_outputs(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Optional: Called before execute() starts
     ///
     /// Use this for initialization that should happen once per task start.
@@ -235,7 +243,7 @@ impl TaskRunner {
     ///
     /// This is the main entry point for task execution.
     /// It handles all lifecycle events and error recovery.
-    pub async fn run(mut self) {
+    pub async fn run(mut self) -> TaskStatus {
         let task_name = self.task.name();
         let task_id = &self.context.id;
 
@@ -246,7 +254,7 @@ impl TaskRunner {
         loop {
             if let Err(e) = self.cmd_rx.changed().await {
                 tracing::error!("Task [{task_name}]-{task_id} command channel closed: {}", e);
-                return;
+                return TaskStatus::Stopped;
             }
 
             let cmd = self.cmd_rx.borrow().clone();
@@ -259,7 +267,7 @@ impl TaskRunner {
                     if let Err(e) = self.task.on_stop(Arc::clone(&self.context)).await {
                         tracing::error!("Task [{task_name}]-{task_id} on_stop failed: {}", e);
                     }
-                    return;
+                    return TaskStatus::Stopped;
                 }
                 Command::Pause => {
                     // Not started yet, ignore pause
@@ -275,8 +283,9 @@ impl TaskRunner {
 
         if let Err(e) = self.task.on_start(Arc::clone(&self.context)).await {
             tracing::error!("Task [{task_name}]-{task_id} on_start failed: {}", e);
-            self.set_status(TaskStatus::Failed(e.to_string())).await;
-            return;
+            let status = TaskStatus::Failed(e.to_string());
+            self.set_status(status.clone()).await;
+            return status;
         }
 
         let task_ref = &self.task;
@@ -285,29 +294,30 @@ impl TaskRunner {
         tokio::pin!(execute_future);
 
         // --- Main select loop: keep execute_future alive across pause/resume ---
-        loop {
+        let final_status = loop {
             tokio::select! {
                 result = &mut execute_future => {
                     // Task execution completed (naturally or because ctx.running() returned false)
-                    match result {
+                    let status = match result {
                         Ok(_) => {
                             tracing::info!("Task [{task_name}]-{task_id} completed successfully");
-                            self.set_status(TaskStatus::Stopped).await;
+                            TaskStatus::Stopped
                         }
                         Err(e) => {
                             tracing::error!("Task [{task_name}]-{task_id} execution failed: {}", e);
-                            self.set_status(TaskStatus::Failed(e.to_string())).await;
+                            TaskStatus::Failed(e.to_string())
                         }
-                    }
+                    };
+                    self.set_status(status.clone()).await;
                     self.context.stop();
-                    break;
+                    break status;
                 }
 
                 cmd_result = self.cmd_rx.changed() => {
                     if cmd_result.is_err() {
                         tracing::error!("Task [{task_name}]-{task_id} command channel closed");
                         self.context.stop();
-                        break;
+                        break TaskStatus::Stopped;
                     }
 
                     let new_cmd = self.cmd_rx.borrow().clone();
@@ -337,14 +347,15 @@ impl TaskRunner {
                             if let Err(e) = self.task.on_stop(Arc::clone(&self.context)).await {
                                 tracing::error!("Task [{task_name}]-{task_id} on_stop failed: {}", e);
                             }
-                            break;
+                            break TaskStatus::Stopped;
                         }
                     }
                 }
             }
-        }
+        };
 
         tracing::info!("Task [{task_name}]-{task_id} shutdown complete");
+        final_status
     }
 }
 
